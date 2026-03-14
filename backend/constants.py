@@ -35,15 +35,16 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 
 # ── Chat: complexity tier token budgets ───────────────────────────────────────
-# Benchmark (2026-03-15): Qwen2.5-7B MLX 4-bit = 19.4 tok/s avg on M4 16 GB
-#   trivial:        256 tok → ~13 s   ✓
-#   conversational: 1024 tok → ~53 s  ✓
-#   technical:      2048 tok → ~105 s (was 4096 = ~211 s — too slow for chat UX)
+# Writer model: Qwen2.5-14B MLX 4-bit ≈ 10 tok/s on M4 16 GB (upgraded from 7B @ 19.4 tok/s)
+# Chat model uses same weights — token budgets apply equally.
+#   trivial:        256 tok → ~26 s   ✓
+#   conversational: 768 tok → ~77 s   ✓
+#   technical:      1536 tok → ~154 s (still acceptable for deep-search chat)
 # Model context window: 32 768 tokens — these are output-only budgets.
 CHAT_MAX_TOKENS: dict[str, int] = {
-    "trivial":        256,    # greetings — enough for a full paragraph
-    "conversational": 1024,   # back-and-forth — up to ~750 words
-    "technical":      2048,   # web search / deep questions — full long-form, ~105 s max
+    "trivial":        256,    # greetings — one clear paragraph
+    "conversational": 768,    # back-and-forth — up to ~560 words
+    "technical":      1536,   # web search / deep questions — long-form, ~154 s max
 }
 
 # ── Chat: system prompts per tier ─────────────────────────────────────────────
@@ -138,14 +139,14 @@ DDG_BACKOFF_DELAYS: tuple[int, ...] = (2, 4, 8)   # seconds between retries
 DDG_INTER_QUERY_DELAY_S = 1.5                       # delay between fan-out queries
 
 # ── Metrics insights: target latency per tier (seconds) ───────────────────────
-# Derived from benchmark: 19.4 tok/s avg on M4 16 GB
-#   trivial:        256 tok / 19.4 = 13 s  → target 15 s (EOS often hits early)
-#   conversational: 1024 tok / 19.4 = 53 s → target 55 s
-#   technical:      2048 tok / 19.4 = 106 s → target 110 s (was 90 s with wrong budget)
+# Writer/chat model: Qwen2.5-14B MLX 4-bit ≈ 10 tok/s on M4 16 GB
+#   trivial:        256 tok / 10  = 26 s  → target 30 s
+#   conversational: 768 tok / 10  = 77 s  → target 85 s
+#   technical:      1536 tok / 10 = 154 s → target 160 s
 INSIGHT_TARGET_LATENCY_S: dict[str, int] = {
-    "trivial":        15,
-    "conversational": 55,
-    "technical":      110,
+    "trivial":        30,
+    "conversational": 85,
+    "technical":      160,
 }
 
 # Only emit a recommendation when |current - ideal| exceeds this threshold

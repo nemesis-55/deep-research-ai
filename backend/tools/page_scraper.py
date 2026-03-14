@@ -1,6 +1,9 @@
 """
 Deep Page Scraper — Deep Research AI
 - Full article text via trafilatura + BeautifulSoup fallback
+- Post-trafilatura cleanup: strip nav/cookie/footer boilerplate
+- Skip pages < 1000 chars, login walls, and product/checkout pages
+- Returns structured {url, title, domain, text, images, ...}
 - Real images extracted with absolute URLs and captions
 - YouTube transcript extraction
 - PDF / DOCX / image local file parsing
@@ -18,6 +21,42 @@ from backend.constants import SCRAPER_USER_AGENT, SCRAPER_TIMEOUT_S
 
 logger = logging.getLogger(__name__)
 
+# ── Minimum text length for a page to be considered useful ────────────────────
+_MIN_USEFUL_CHARS = 1000
+
+# ── Login / paywall / product page signals (checked in raw HTML) ───────────────
+_LOGIN_WALL_RE = re.compile(
+    r'(sign[-\s]?in to continue|log in to read|subscribe to (access|read|view)|'
+    r'create an? (free )?account|access denied|403 forbidden|'
+    r'members only|premium content|paywall)',
+    re.IGNORECASE,
+)
+_PRODUCT_PAGE_RE = re.compile(
+    r'(add to (cart|bag|basket)|buy now|checkout|'
+    r'in stock|out of stock|free shipping|'
+    r'product description|customer reviews?\s+\d|\$[\d,]+\.?\d*\s+USD)',
+    re.IGNORECASE,
+)
+
+# ── Boilerplate patterns to strip after trafilatura extraction ─────────────────
+# These appear as literal text lines in trafilatura output on noisy sites.
+_BOILERPLATE_RE = re.compile(
+    r'^('
+    r'accept (all )?cookies?|cookie (policy|preferences|settings|notice|consent)|'
+    r'we use cookies|your privacy|privacy (settings|choices)|'
+    r'(skip to|jump to) (main )?content|'
+    r'(main |top |site |global )?(nav(igation)?|menu|header|footer)|'
+    r'breadcrumb|you are here|'
+    r'share (this|on|via)|follow us (on|at)|'
+    r'subscribe (to our)? (newsletter|updates|alerts)|'
+    r'(all )?rights? reserved|copyright \d{4}|'
+    r'advertisement|sponsored content|'
+    r'loading\.\.\.|please wait|'
+    r'back to top|scroll to top'
+    r')[\s:.\-]*$',
+    re.IGNORECASE,
+)
+
 HEADERS = {"User-Agent": SCRAPER_USER_AGENT}
 
 YOUTUBE_DOMAINS = {"youtube.com", "youtu.be", "www.youtube.com", "m.youtube.com"}
@@ -27,6 +66,59 @@ _SKIP_IMG_KEYWORDS = {
     "blank", "spacer", "avatar", "placeholder", "badge",
     "button", "arrow", "close", "menu", "social",
 }
+
+
+# ── Post-trafilatura text cleanup ─────────────────────────────────────────────
+
+def _clean_text(text: str) -> str:
+    """
+    Remove boilerplate lines (nav/cookie/footer noise) that trafilatura
+    sometimes leaves in extracted text.
+    Also collapses excessive blank lines.
+    """
+    if not text:
+        return ""
+
+    cleaned_lines: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        # Skip empty lines (we'll re-add paragraph breaks below)
+        if not stripped:
+            # Preserve paragraph structure: keep a single blank line
+            if cleaned_lines and cleaned_lines[-1] != "":
+                cleaned_lines.append("")
+            continue
+        # Drop boilerplate lines
+        if _BOILERPLATE_RE.match(stripped):
+            continue
+        # Drop very short isolated lines (< 4 words) that are likely UI chrome
+        if len(stripped.split()) < 4 and len(stripped) < 30:
+            continue
+        cleaned_lines.append(line)
+
+    # Collapse runs of blank lines into a single blank line
+    result_lines: List[str] = []
+    prev_blank = False
+    for line in cleaned_lines:
+        is_blank = line.strip() == ""
+        if is_blank and prev_blank:
+            continue
+        result_lines.append(line)
+        prev_blank = is_blank
+
+    return "\n".join(result_lines).strip()
+
+
+def _is_login_wall(html: str, text: str) -> bool:
+    """Return True if the page appears to be a login wall or paywall."""
+    sample = (html[:3000] + " " + text[:1000]).lower()
+    return bool(_LOGIN_WALL_RE.search(sample))
+
+
+def _is_product_page(text: str) -> bool:
+    """Return True if the page appears to be an e-commerce product page."""
+    sample = text[:2000]
+    return bool(_PRODUCT_PAGE_RE.search(sample))
 
 
 # ── YouTube ───────────────────────────────────────────────────────────────────
@@ -232,18 +324,27 @@ def scrape_page(
     Scrape a URL and return:
     {
         "url": str,
+        "title": str,
+        "domain": str,
         "text": str,
         "images": [{"url", "alt", "caption"}],
         "youtube_embeds": [{"url", "transcript"}],
-        "followed_sources": [{"url", "text", "images"}],
+        "followed_sources": [{"url", "title", "domain", "text", "images"}],
     }
+    Pages shorter than _MIN_USEFUL_CHARS, login walls, and product pages are
+    returned with empty "text" so callers can skip them.
     Also handles local file paths and file:// URIs.
     """
+    from urllib.parse import urlparse as _urlparse
+    _domain = _urlparse(url).netloc.lower().removeprefix("www.")
+
     result: Dict = {
-        "url": url,
-        "text": "",
-        "images": [],
-        "youtube_embeds": [],
+        "url":              url,
+        "title":            "",
+        "domain":           _domain,
+        "text":             "",
+        "images":           [],
+        "youtube_embeds":   [],
         "followed_sources": [],
     }
 
@@ -251,25 +352,26 @@ def scrape_page(
     if url.startswith("file://") or (not url.startswith("http") and Path(url).exists()):
         local_path = url.replace("file://", "")
         parsed = _parse_local_file(local_path)
-        result["text"] = parsed["text"]
+        result["text"]   = parsed["text"]
         result["images"] = parsed["images"]
+        result["title"]  = Path(local_path).name
         return result
 
     # ── YouTube direct link ───────────────────────────────────────────────
     if _is_youtube(url):
         transcript = _get_youtube_transcript(url)
-        result["text"] = transcript
+        result["text"]           = transcript
         result["youtube_embeds"] = [{"url": url, "transcript": transcript}]
         return result
 
     # ── Fetch web page ────────────────────────────────────────────────────
     import requests
+    html: str = ""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
         resp.raise_for_status()
         content_type = resp.headers.get("Content-Type", "").lower()
         raw_bytes = resp.content
-        html = None
 
         if "application/pdf" in content_type:
             result["text"] = _parse_pdf(raw_bytes)
@@ -285,7 +387,23 @@ def scrape_page(
         logger.warning(f"Fetch failed {url}: {e}")
         return result
 
+    # ── Extract page title ────────────────────────────────────────────────
+    try:
+        _soup_title = BeautifulSoup(html[:4096], "html.parser")
+        _t = _soup_title.find("title")
+        if _t:
+            result["title"] = _t.get_text(strip=True)[:200]
+    except Exception:
+        pass
+
+    # ── Login wall / product page guard ──────────────────────────────────
+    # Do a quick pre-check on raw HTML before spending time extracting text
+    if _is_login_wall(html, ""):
+        logger.info(f"[Scraper] ⏭ Login wall detected — skipping {url[:70]}")
+        return result
+
     # ── Extract text ──────────────────────────────────────────────────────
+    text: str = ""
     try:
         import trafilatura
         text = trafilatura.extract(
@@ -294,9 +412,9 @@ def scrape_page(
             include_tables=True,
             no_fallback=False,
             include_links=False,
-        )
+        ) or ""
     except Exception:
-        text = None
+        text = ""
 
     # BeautifulSoup fallback
     if not text or len(text) < 150:
@@ -308,7 +426,23 @@ def scrape_page(
         except Exception:
             text = ""
 
-    result["text"] = (text or "").strip()
+    # ── Post-trafilatura cleanup ──────────────────────────────────────────
+    text = _clean_text(text)
+
+    # ── Quality gates ─────────────────────────────────────────────────────
+    if len(text) < _MIN_USEFUL_CHARS:
+        logger.info(
+            f"[Scraper] ⏭ Too short ({len(text)} chars < {_MIN_USEFUL_CHARS}) — {url[:70]}"
+        )
+        result["text"] = ""
+        return result
+
+    if _is_product_page(text):
+        logger.info(f"[Scraper] ⏭ Product page detected — skipping {url[:70]}")
+        result["text"] = ""
+        return result
+
+    result["text"] = text.strip()
 
     # ── Extract images ────────────────────────────────────────────────────
     result["images"] = _extract_images(html, url)
@@ -338,8 +472,10 @@ def scrape_page(
                 )
                 if fsub.get("text") and len(fsub["text"]) > 150:
                     result["followed_sources"].append({
-                        "url": furl,
-                        "text": fsub["text"][:5000],
+                        "url":    furl,
+                        "title":  fsub.get("title", furl),
+                        "domain": fsub.get("domain", ""),
+                        "text":   fsub["text"][:5000],
                         "images": fsub.get("images", [])[:5],
                     })
             except Exception as e:

@@ -8,7 +8,7 @@ Alt      → mlx_lm     (if llama_cpp unavailable)
 
 16 GB memory budget
 ────────────────────
-One model loaded at a time, max ~5.5 GB (8B Q4) or ~4.8 GB (7B Q4).
+One model loaded at a time, max ~8.5 GB (14B Q4) planner ~4.5 GB (8B Q4).
 Embedding model (~100 MB) stays loaded independently and is never swapped.
 clear_memory() calls mx.metal.clear_cache() + gc.collect() after every unload.
 
@@ -215,12 +215,15 @@ def _resolve_mlx_path(repo: str) -> str:
     folder = "models--" + repo.replace("/", "--")
     snapshots_dir = cache / folder / "snapshots"
     if snapshots_dir.exists():
-        # pick the first (and normally only) snapshot hash
-        snaps = sorted(snapshots_dir.iterdir())
-        if snaps:
-            resolved = str(snaps[-1].resolve())
-            logger.info(f"  → resolved local path: {resolved}")
-            return resolved
+        # Pick the most recent snapshot hash that has a config.json
+        # (incomplete downloads won't have it, so we skip them)
+        snaps = sorted(snapshots_dir.iterdir(), reverse=True)
+        for snap in snaps:
+            if snap.is_dir() and (snap / "config.json").exists():
+                resolved = str(snap.resolve())
+                logger.info(f"  → resolved local path: {resolved}")
+                return resolved
+        logger.warning(f"  → snapshot dir exists but no complete snapshot for {repo}")
     # Fallback: let mlx_lm download via HF hub (env vars already set)
     logger.warning(f"  → no local snapshot found for {repo}, will download")
     return repo
@@ -311,13 +314,13 @@ def load_planner_model() -> ModelHandle:
 
 def load_writer_model() -> ModelHandle:
     logger.info("=" * 55)
-    logger.info("Loading WRITER — Qwen2.5-7B Q4_K_M")
+    logger.info("Loading WRITER — Qwen2.5-14B Q4_K_M")
     logger.info("=" * 55)
     return _load("writer")
 
 def load_chat_model() -> ModelHandle:
     logger.info("=" * 55)
-    logger.info("Loading CHAT — Qwen2.5-7B Q4_K_M")
+    logger.info("Loading CHAT — Qwen2.5-14B Q4_K_M")
     logger.info("=" * 55)
     return _load("chat")
 

@@ -113,9 +113,10 @@ def get_device() -> str:
 def prefetch_models() -> dict:
     """
     Download all model weights into cache/ if not already present.
-    Shows a real tqdm progress bar for each download.
-    Skips any repo that already has a complete snapshot on disk.
+    Automatically purges incomplete/corrupt partial downloads before retrying.
+    Skips any repo that already has a fully complete snapshot on disk.
     """
+    import shutil
     from pathlib import Path
     from huggingface_hub import snapshot_download
     from backend.config_loader import get as cfg_get
@@ -125,17 +126,62 @@ def prefetch_models() -> dict:
     token   = cfg_get("huggingface.token", "") or None
     results: dict = {}
 
+    def _repo_dir(repo: str) -> Path:
+        return cache / ("models--" + repo.replace("/", "--"))
+
+    def _has_incomplete_blobs(repo: str) -> bool:
+        """True if the blobs/ dir contains any .incomplete files (stalled download)."""
+        blobs = _repo_dir(repo) / "blobs"
+        if not blobs.exists():
+            return False
+        return any(b.name.endswith(".incomplete") for b in blobs.iterdir())
+
     def _snapshot_exists(repo: str) -> bool:
-        """True if the repo has at least one snapshot dir with a safetensors file."""
-        dir_name  = "models--" + repo.replace("/", "--")
-        repo_dir  = cache / dir_name
-        snaps_dir = repo_dir / "snapshots"
+        """
+        True only when the repo has a fully complete snapshot:
+          - snapshots/<hash>/config.json  must exist
+          - at least one substantial weight blob (>100 KB) must be present
+            and must NOT be an .incomplete file
+        """
+        snaps_dir = _repo_dir(repo) / "snapshots"
         if not snaps_dir.exists():
             return False
         for snap in snaps_dir.iterdir():
-            if snap.is_dir() and any(snap.iterdir()):
-                return True
+            if not snap.is_dir():
+                continue
+            if not (snap / "config.json").exists():
+                continue
+            # Weight files can live directly in snapshot (small models) or
+            # as symlinks into blobs/ (large sharded models).
+            # Resolve symlinks so we check actual file content, not just the link.
+            for f in snap.iterdir():
+                if f.name.endswith(".incomplete"):
+                    continue
+                try:
+                    real = f.resolve()
+                    if real.suffix in (".safetensors", ".bin", ".gguf") and real.stat().st_size > 100_000:
+                        return True
+                except Exception:
+                    pass
+            # Sharded models: check blobs/ directly for any large complete blob
+            blobs_dir = _repo_dir(repo) / "blobs"
+            if blobs_dir.exists():
+                for b in blobs_dir.iterdir():
+                    if b.name.endswith(".incomplete"):
+                        continue
+                    try:
+                        if b.stat().st_size > 100_000:
+                            return True
+                    except Exception:
+                        pass
         return False
+
+    def _purge_incomplete(repo: str) -> None:
+        """Remove the entire repo cache dir so snapshot_download starts fresh."""
+        d = _repo_dir(repo)
+        if d.exists():
+            print(f"  🗑️   [{repo}] purging incomplete download ({d.name}) …")
+            shutil.rmtree(d, ignore_errors=True)
 
     # ── MLX repos (planner + writer/chat share one repo) ─────────────────────
     seen_repos: set = set()
@@ -149,12 +195,19 @@ def prefetch_models() -> dict:
             continue
         seen_repos.add(repo)
 
+        # ── Detect & purge incomplete downloads before the exists-check ──────
+        if _has_incomplete_blobs(repo) or (
+            _repo_dir(repo).exists() and not _snapshot_exists(repo)
+        ):
+            _purge_incomplete(repo)
+
         if _snapshot_exists(repo):
             print(f"  ✅  [{key}] cached")
             results[key] = "cached"
             continue
 
         print(f"  ⬇️   [{key}] downloading {repo} …")
+        print(f"        (large models can take several minutes on first run)")
         try:
             snapshot_download(
                 repo_id         = repo,
@@ -165,7 +218,7 @@ def prefetch_models() -> dict:
             print(f"  ✅  [{key}] downloaded")
             results[key] = "downloaded"
         except Exception as e:
-            print(f"  ⚠️   [{key}] {e}")
+            print(f"  ⚠️   [{key}] download failed: {e}")
             results[key] = f"warning: {e}"
 
     return results

@@ -39,8 +39,10 @@ from backend.model_manager import (
 from backend.tools.article_scraper import ArticleScraper
 from backend.tools.knowledge_graph import KnowledgeGraph
 from backend.tools.page_scraper import _parse_local_file
+from backend.tools.source_filter import filter_and_sort
 from backend.tools.source_scorer import score_and_filter
 from backend.tools.vector_store import VectorStore
+from backend.tools.web_search import fan_out_search
 from backend.tools.web_search_engine import multi_query_search
 
 logger = logging.getLogger(__name__)
@@ -134,9 +136,16 @@ class ResearchPipeline:
                 "message": f"✅ {len(queries)} queries ready — starting fan-out search…",
             }
 
-            # Fan-out search: N queries × M results = up to N×M candidate URLs
+            # Fan-out search: N queries × 10 results = up to N×10 candidate URLs,
+            # then apply source filter (blocklist + prefer-list) and cap.
             def _do_multi_search() -> list:
-                return multi_query_search(queries, results_per_query=results_per_query)
+                raw = multi_query_search(queries, results_per_query=results_per_query)
+                filtered = filter_and_sort(raw, cap=get("deep_crawl.max_articles", 20))
+                logger.info(
+                    f"[Research Pipeline] Phase-0 queries={len(queries)} "
+                    f"raw_urls={len(raw)} filtered_urls={len(filtered)}"
+                )
+                return filtered
 
             candidates = await loop.run_in_executor(None, _do_multi_search)
             yield {
@@ -190,7 +199,8 @@ class ResearchPipeline:
 
                     def _do_refine_search() -> list:
                         raw = multi_query_search(refine_queries, results_per_query=results_per_query)
-                        return [r for r in raw if r["url"] not in seen_urls]
+                        filtered = filter_and_sort(raw, cap=get("deep_crawl.max_articles", 20))
+                        return [r for r in filtered if r["url"] not in seen_urls]
 
                     extra_candidates = await loop.run_in_executor(None, _do_refine_search)
 
@@ -261,10 +271,36 @@ class ResearchPipeline:
         yield {"type": "plan",   "plan": plan}
         yield {"type": "status", "message": f"✅ Plan ready — {len(plan)} tasks"}
 
-        # ── Step 3: Swap to Writer — Qwen2.5-7B ──────────────────────────
-        yield {"type": "status", "message": "🔄 Unloading Planner → Loading Writer (Qwen2.5-7B Q4)…"}
+        # ── Step 2b: Batch query generation (planner still loaded) ────────
+        # Generate all per-task search queries NOW while DeepSeek-R1 is in
+        # memory.  After this block we swap to the writer and never touch the
+        # planner again — eliminating writer↔planner swaps mid-pipeline.
+        yield {
+            "type":    "status",
+            "message": f"🔎 Pre-generating search queries for {len(plan)} tasks (planner model)…",
+        }
+        from backend.tools.query_generator import generate_queries as _gen_queries
+        task_queries: dict[str, List[str]] = {}
+        for task in plan:
+            try:
+                qs = await loop.run_in_executor(None, lambda t=task: _gen_queries(t, n=5))
+                task_queries[task] = qs
+                logger.info(f"[Pipeline] Queries cached for '{task[:60]}': {qs}")
+            except Exception as e:
+                logger.warning(f"[Pipeline] Query gen failed for '{task[:50]}': {e}")
+                task_queries[task] = []   # research_agent fallback handles this
+
+        yield {
+            "type":    "status",
+            "message": f"✅ Search queries ready for all {len(plan)} tasks",
+        }
+        for ev in _drain_think(loop):
+            yield ev
+
+        # ── Step 3: Swap to Writer — Qwen2.5-14B ─────────────────────────
+        yield {"type": "status", "message": "🔄 Unloading Planner → Loading Writer (Qwen2.5-14B Q4)…"}
         await loop.run_in_executor(None, lambda: swap_model("writer"))
-        yield {"type": "status", "message": "✅ Writer model ready"}
+        yield {"type": "status", "message": "✅ Writer (Qwen2.5-14B) ready — no further model swaps"}
 
         # ── Step 4: Execute research tasks ────────────────────────────────
         researcher = ResearchAgent(self.vector_store, self.kg)
@@ -272,6 +308,9 @@ class ResearchPipeline:
         for i, task in enumerate(plan, 1):
             yield {"type": "progress", "current": i, "total": len(plan), "task": task}
             yield {"type": "status",   "message": f"[{i}/{len(plan)}] 🔍 {task[:90]}"}
+
+            # Inject pre-generated queries so ResearchAgent skips LLM query gen
+            prebuilt_queries = task_queries.get(task, [])
 
             # ── Live-streaming status via asyncio.Queue ────────────────────
             # The research_task runs in a thread (run_in_executor). We bridge
@@ -293,11 +332,13 @@ class ResearchPipeline:
 
             _live_msgs: List[str] = []
 
-            async def _run_task(t: str):
+            async def _run_task(t: str, prebuilt: List[str]):
                 try:
                     result = await loop.run_in_executor(
                         None,
-                        lambda: researcher.research_task(t, status_callback=_cb),
+                        lambda: researcher.research_task(
+                            t, status_callback=_cb, prebuilt_queries=prebuilt
+                        ),
                     )
                 finally:
                     loop.call_soon_threadsafe(status_q.put_nowait, _SENTINEL)
@@ -305,7 +346,7 @@ class ResearchPipeline:
 
             # Run task + drain concurrently, yielding live msgs as they arrive
             sources = []
-            task_future = asyncio.ensure_future(_run_task(task))
+            task_future = asyncio.ensure_future(_run_task(task, prebuilt_queries))
             try:
                 while not task_future.done():
                     # Drain any queued messages without blocking the event loop

@@ -27,11 +27,22 @@ storage:
 # runtime: "mlx" → Apple Silicon GPU via mlx-lm
 # One model in memory at a time — sequential swap enforced by model_manager.
 #
-# Memory budget (16 GB unified):
-#   planner  (DeepSeek-R1 8B  4-bit) ≈ 5.0 GB
-#   writer   (Qwen2.5-7B      4-bit) ≈ 4.0 GB
-#   chat     (Qwen2.5-7B      4-bit) ≈ 4.0 GB  ← same weights, different role
-#   embedder (bge-small-en)          ≈ 0.1 GB  ← always loaded
+# Memory budget (16 GB unified, Mac Mini M4):
+#   planner  (DeepSeek-R1 8B   4-bit) ≈ 5.0 GB  ← reasoning/planning
+#   writer   (Qwen2.5-14B      4-bit) ≈ 8.5 GB  ← upgraded: 2× params, far better prose
+#   chat     (Qwen2.5-14B      4-bit) ≈ 8.5 GB  ← same weights, chat role
+#   embedder (bge-small-en)           ≈ 0.1 GB  ← always loaded, never swapped
+#
+# Swap elimination strategy:
+#   ALL query generation (query_generator) is batched during Phase 0 while the
+#   planner is still loaded and results are cached in the pipeline.  By the time
+#   the writer loads, no further planner calls are needed → zero mid-run swaps.
+#
+# Writer upgrade rationale (Qwen2.5-14B vs 7B):
+#   - 14B fits in 16 GB when it is the only model loaded (~8.5 GB 4-bit)
+#   - Significantly better instruction following, citation accuracy, structure
+#   - Context window 32 K (unchanged) — no regression on long evidence inputs
+#   - ~10 tok/s on M4 vs 19 tok/s for 7B — acceptable for batch report writing
 models:
   planner:
     name:           "DeepSeek-R1-Distill-Llama-8B (MLX 4-bit)"
@@ -42,17 +53,17 @@ models:
     temperature:    0.6
 
   writer:
-    name:           "Qwen2.5-7B-Instruct (MLX 4-bit)"
+    name:           "Qwen2.5-14B-Instruct (MLX 4-bit)"
     runtime:        mlx
-    mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
+    mlx_repo:       "mlx-community/Qwen2.5-14B-Instruct-4bit"
     context_length: 32768
-    max_new_tokens: 1024   # ceiling for explicit calls; agents pass their own value
+    max_new_tokens: 1024   # ceiling; agents pass their own value per call
     temperature:    0.7
 
   chat:
-    name:           "Qwen2.5-7B-Instruct (MLX 4-bit)"
+    name:           "Qwen2.5-14B-Instruct (MLX 4-bit)"
     runtime:        mlx
-    mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
+    mlx_repo:       "mlx-community/Qwen2.5-14B-Instruct-4bit"
     context_length: 32768
     max_new_tokens: 4096   # chat/technical tier needs full budget
     temperature:    0.7

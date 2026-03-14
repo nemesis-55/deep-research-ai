@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 _SECTION_PROMPT = """\
-You are a world-class research analyst. Write one section of a deep-dive research report.
+You are a world-class research analyst writing one section of a deep-dive report.
 
 Report Topic: {query}
 Section: {section_topic}
@@ -39,12 +39,26 @@ Section: {section_topic}
 Research Evidence (use ONLY what is provided below — do not add external knowledge):
 {evidence}
 
+Write this section using the following structure:
+### Major Developments
+- Key events, announcements, and breakthroughs with specific dates and figures
+
+### Industry Impact
+- Effects on markets, organisations, and stakeholders; include data where present
+
+### Expert Commentary
+- Direct quotes or attributed views from named experts or institutions
+
+### Strategic Implications
+- Forward-looking analysis: risks, opportunities, and decisions decision-makers face
+
+### Sources
+- Inline citations as [Title](URL) using ONLY URLs that appear in the evidence above
+
 Requirements:
 - Start with ## heading matching the section topic
-- Use ### sub-headings for major sub-points
-- Cite every claim inline as [Title](URL) using only URLs that appear in the evidence above
+- Cite every claim inline as [Title](URL) using only URLs from the evidence
 - Include specific facts, numbers, dates, and direct quotes where present
-- Use bullet points for lists of data or findings
 - Length: 400–700 words
 - Do NOT invent URLs or cite sources not in the evidence"""
 
@@ -195,14 +209,15 @@ class ReportAgent:
             all_validated_sources.extend(ev.sources)
 
             # ── LLM section generation ─────────────────────────────────────
-            # Budget: 800 tok @ 19.4 tok/s ≈ 41 s per section (was 1000 = 51 s)
+            # Budget: 600 tok @ ~10 tok/s (Qwen2.5-14B) ≈ 60 s per section
+            # (was 800 tok @ 19.4 tok/s for 7B — same wall-clock, better quality)
             raw_section = generate_text(
                 _SECTION_PROMPT.format(
                     query          = query,
                     section_topic  = task,
                     evidence       = ev.context,
                 ),
-                max_new_tokens=800, role="writer",
+                max_new_tokens=600, role="writer",
             )
 
             # ── Citation validation ────────────────────────────────────────
@@ -223,13 +238,13 @@ class ReportAgent:
 
         # ── Executive summary ──────────────────────────────────────────────
         logger.info("[Report] Executive summary…")
-        # Budget: 500 tok @ 19.4 tok/s ≈ 26 s (was 600 = 31 s)
+        # Budget: 400 tok @ ~10 tok/s (Qwen2.5-14B) ≈ 40 s
         exec_summary = generate_text(
             _EXEC_SUMMARY_PROMPT.format(
                 query            = query,
                 sections_preview = "\n\n".join(s[:400] for s in sections[:6]),
             ),
-            max_new_tokens=500, role="writer",
+            max_new_tokens=400, role="writer",
         )
         exec_summary, _ = validate_citations(
             exec_summary,
@@ -239,13 +254,13 @@ class ReportAgent:
 
         # ── Conclusion ─────────────────────────────────────────────────────
         logger.info("[Report] Conclusion…")
-        # Budget: 350 tok @ 19.4 tok/s ≈ 18 s (was 400 = 21 s)
+        # Budget: 300 tok @ ~10 tok/s (Qwen2.5-14B) ≈ 30 s
         conclusion = generate_text(
             _CONCLUSION_PROMPT.format(
                 query        = query,
                 key_findings = "\n".join(s[:200] for s in sections)[:4000],
             ),
-            max_new_tokens=350, role="writer",
+            max_new_tokens=300, role="writer",
         )
         conclusion, _ = validate_citations(
             conclusion,

@@ -5,7 +5,7 @@ Startup script — Deep Research AI (Apple Silicon)
 Sequential startup — everything runs in the SAME process in order:
   1. Requirements check  — abort if any package is missing.
   2. HF login + prefetch — authenticate and download all model weights.
-  3. Load model          — Qwen2.5-7B Q4 into Metal (MLX), offline mode.
+  3. Load model          — Qwen2.5-14B Q4 into Metal (MLX), offline mode.
   4. Warmup inference    — one short generation to JIT Metal shaders + measure latency.
   5. Launch uvicorn      — IN-PROCESS so the loaded model is shared.
   6. Open browser        — once /health responds (up to 120 s wait).
@@ -247,9 +247,9 @@ def load_model() -> None:
     Shows a live status line: elapsed | phase | disk read speed | RAM used
     """
     _banner("🧠  Step 3 — Loading chat model into Metal (MLX 4-bit)")
-    print("  Model  : Qwen2.5-7B-Instruct (MLX 4-bit)")
+    print("  Model  : Qwen2.5-14B-Instruct (MLX 4-bit)")
     print("  Source : local cache/ (project folder)")
-    print("  Size   : ~4.0 GB safetensors\n")
+    print("  Size   : ~8.5 GB safetensors\n")
 
     import psutil
 

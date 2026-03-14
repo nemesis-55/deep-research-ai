@@ -2,9 +2,9 @@
 Research Agent — Deep Research AI
 
 Flow per task:
-  1. Generate 3 focused search queries
-  2. Parallel multi-query DDG search
-  3. Domain filter (url_filter)
+  1. Generate 5 focused search queries via query_generator (DeepSeek-R1)
+  2. Fan-out multi-query DDG search (10 results/query, cap 15 unique URLs)
+  3. Source filter (blocklist + prefer-list sort) via source_filter
   4. Parallel HTTP scrape (I/O-bound threads)
   5. Semantic chunk ranking + evidence assembly (build_evidence)
   6. Single LLM analysis call over top-ranked evidence
@@ -16,11 +16,14 @@ from typing import Callable, Dict, List, Optional
 from backend.config_loader import get
 from backend.model_loader import generate_text
 from backend.tools.knowledge_graph import KnowledgeGraph, extract_entities_and_relations
+from backend.tools.query_generator import generate_queries
+from backend.tools.source_filter import filter_and_sort
 from backend.tools.source_scorer import score_source
 from backend.tools.url_filter import is_allowed
 from backend.tools.evidence_builder import build_evidence
 from backend.tools.vector_store import VectorStore
-from backend.tools.web_search_engine import multi_query_search, parallel_scrape_pages
+from backend.tools.web_search import fan_out_search
+from backend.tools.web_search_engine import parallel_scrape_pages
 
 logger = logging.getLogger(__name__)
 
@@ -60,8 +63,18 @@ class ResearchAgent:
         self,
         task: str,
         status_callback: Optional[Callable[[str], None]] = None,
+        prebuilt_queries: Optional[List[str]] = None,
     ) -> List[Dict]:
-        """Full deep research for one task. Returns list of source dicts."""
+        """Full deep research for one task. Returns list of source dicts.
+
+        Args:
+            task:              Research sub-task description.
+            status_callback:   Optional SSE progress callback.
+            prebuilt_queries:  Pre-generated search queries from the pipeline's
+                               planner phase.  When provided, skips the
+                               generate_queries() LLM call entirely — no model
+                               swap needed mid-pipeline.
+        """
         sources: List[Dict] = []
 
         def _status(msg: str) -> None:
@@ -73,42 +86,57 @@ class ResearchAgent:
         logger.info(f"[ResearchAgent]   Task      : {task}")
         logger.info(f"[ResearchAgent]   max_pages : {self.max_pages}")
 
-        # ── 1. Generate 3 focused queries from the task ───────────────────
-        _status(f"🔎 Generating search queries: {task[:70]}")
-        queries = self._make_queries(task)
-        logger.info(f"[ResearchAgent] Queries: {queries}")
+        # ── 1. Use pre-built queries (no LLM call) or generate on-the-fly ─
+        if prebuilt_queries:
+            queries = prebuilt_queries
+            logger.info(
+                f"[Research Pipeline] queries={len(queries)} (pre-built, no LLM): "
+                + " | ".join(f'"{q}"' for q in queries)
+            )
+        else:
+            _status(f"🔎 Generating search queries: {task[:70]}")
+            queries = generate_queries(task, n=5)
+            logger.info(
+                f"[Research Pipeline] queries={len(queries)} (on-the-fly): "
+                + " | ".join(f'"{q}"' for q in queries)
+            )
 
-        # ── 2. Multi-query search ─────────────────────────────────────────
+        # ── 2. Fan-out multi-query search (10 results/query, cap 15 URLs) ─
         _status(f"🌐 Searching ({len(queries)} queries)…")
-        candidates = multi_query_search(queries, results_per_query=self.max_results)
-        logger.info(f"[ResearchAgent] Search returned {len(candidates)} unique URLs")
+        raw_candidates = fan_out_search(queries, results_per_query=10, max_urls=15)
+        logger.info(
+            f"[Research Pipeline] search returned {len(raw_candidates)} raw URLs"
+        )
 
-        # ── 3. Domain filter ──────────────────────────────────────────────
-        before = len(candidates)
+        # ── 3. Source filter: blocklist + prefer-list sort + url_filter ───
+        candidates = filter_and_sort(raw_candidates, cap=15)
         candidates = [c for c in candidates if is_allowed(c.get("url", ""))]
-        dropped = before - len(candidates)
-        if dropped:
-            logger.info(f"[ResearchAgent] Domain filter: dropped {dropped} low-quality URLs")
+        logger.info(
+            f"[Research Pipeline] urls after filter={len(candidates)}"
+        )
 
         if not candidates:
             _status(f"⚠️ No credible URLs found for: {task[:60]}")
             return sources
 
-        # Cap to top N unique URLs (prioritise by pre-score)
-        # max_pages * 1.5 gives a scrape buffer for 404s/stubs (benchmark: ~30% fail rate)
-        scrape_budget = min(15, max(self.max_pages + 4, int(self.max_pages * 1.5)))
+        # Sort by source credibility score before capping scrape budget
+        # (filter_and_sort already prefer-lists, this adds domain score on top)
+        scrape_budget = min(self.max_pages, len(candidates))
         candidates = sorted(
-            candidates[:50],
+            candidates,
             key=lambda c: score_source(c["url"], c.get("snippet", ""), ""),
             reverse=True,
         )[:scrape_budget]
 
         # ── 4. Scrape pages in parallel (I/O-bound — safe with threads) ─────
-        _status(f"  📄 Scraping {min(self.max_pages, len(candidates))} pages in parallel…")
+        _status(f"  📄 Scraping {scrape_budget} pages in parallel…")
         pages = parallel_scrape_pages(
-            candidates[: self.max_pages],
+            candidates,
             min_chars=1000,
             follow_links=self.follow_links,
+        )
+        logger.info(
+            f"[Research Pipeline] chunks_after_scrape={len(pages)} pages"
         )
 
         # Store in vector DB and extract entities for each page
@@ -131,8 +159,9 @@ class ResearchAgent:
         evidence = build_evidence(task, pages, top_k=20, max_chars=20_000)
 
         logger.info(
-            f"[ResearchAgent] Evidence: {len(evidence.sources)} sources, "
-            f"{len(evidence.context):,} chars"
+            f"[Research Pipeline] sources={len(evidence.sources)} "
+            f"chunks_ranked={min(20, len(pages))} "
+            f"evidence_chars={len(evidence.context):,}"
         )
 
         # ── 6. Single LLM analysis over all ranked evidence ──────────────
@@ -143,7 +172,7 @@ class ResearchAgent:
                     task=task,
                     content=evidence.context,
                 ),
-                max_new_tokens=800, role="writer",
+                max_new_tokens=600, role="writer",  # 600 tok @ ~10 tok/s ≈ 60 s
             )
         else:
             analysis = ""
@@ -179,21 +208,3 @@ class ResearchAgent:
         )
         _status(f"✅ Done: {task[:60]} — {len(sources)} sources")
         return sources
-
-    # ── Query generator ───────────────────────────────────────────────────────
-
-    def _make_queries(self, task: str) -> List[str]:
-        """
-        Convert a research sub-task into 3 focused search queries.
-        Uses simple deterministic expansion — fast and reliable.
-        The QueryPlanner (DeepSeek) handles the broader Phase-0 queries;
-        per-task queries just need to be concise and varied.
-        """
-        import datetime
-        base = task.strip().rstrip("?").strip()
-        year = datetime.date.today().year
-        return [
-            base,
-            f"{base} {year}",
-            f"{base} analysis report",
-        ]
