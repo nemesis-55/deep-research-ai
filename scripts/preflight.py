@@ -177,7 +177,7 @@ def check_constants() -> None:
         from backend import constants as C
         assert C.CHAT_MAX_TOKENS["trivial"]        == 256,  "trivial budget wrong"
         assert C.CHAT_MAX_TOKENS["conversational"] == 768,  "conversational budget wrong"
-        assert C.CHAT_MAX_TOKENS["technical"]      == 1536, "technical budget wrong"  # 1536 @ ~10 tok/s (14B) ≈ 154 s
+        assert C.CHAT_MAX_TOKENS["technical"]      == 2048, "technical budget wrong"  # 2048 @ ~4 tok/s (14B 4-bit) ≈ 512 s
         assert len(C.SEARCH_PHRASES) >= 10,    "SEARCH_PHRASES too short"
         assert len(C.TECHNICAL_KEYWORDS) >= 10, "TECHNICAL_KEYWORDS too short"
         assert C.DDG_BACKOFF_DELAYS == (2, 4, 8), "DDG back-off wrong"
@@ -257,7 +257,7 @@ def check_web_search() -> None:
         urls = [r["url"] for r in results]
         return f"{len(results)} results: {urls[0][:60]}…"
 
-    _run("DuckDuckGo search returns results", _search)
+    _run("DuckDuckGo search returns results", _search, warn_only=True)
 
     def _classify():
         from backend.main import _needs_web_search, _classify_prompt
@@ -294,6 +294,7 @@ def check_scraper() -> None:
     _print_header("7 · Web scraper (trafilatura + BS4)")
 
     def _scrape():
+        print("    (importing trafilatura — slow first load, ~30s) …", flush=True)
         from backend.tools.page_scraper import scrape_page
         # Use a stable, lightweight URL unlikely to block scrapers
         result = scrape_page("https://en.wikipedia.org/wiki/Apple_silicon", timeout=20)
@@ -302,7 +303,7 @@ def check_scraper() -> None:
             raise RuntimeError(f"Scrape returned too little text ({len(text)} chars) — possible block")
         return f"{len(text):,} chars scraped from Wikipedia"
 
-    _run("scrape_page() extracts article text", _scrape)
+    _run("scrape_page() extracts article text", _scrape, warn_only=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -44,7 +44,7 @@ DEFAULT_PORT = 8000
 CHAT_MAX_TOKENS: dict[str, int] = {
     "trivial":        256,    # greetings — one clear paragraph
     "conversational": 768,    # back-and-forth — up to ~560 words
-    "technical":      1536,   # web search / deep questions — long-form, ~154 s max
+    "technical":      2048,   # web search / deep questions — long-form, ~512 s max
 }
 
 # ── Chat: system prompts per tier ─────────────────────────────────────────────

@@ -15,10 +15,15 @@ Fan-out model
 import hashlib
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Dict, List, Optional
 
 from backend.config_loader import get
 from backend.constants import DDG_BACKOFF_DELAYS
+
+# Hard wall-clock budget for one full search_web() call (all retries included).
+# primp's per-request socket timeout is set via DDGS(timeout=…).
+_SEARCH_HARD_TIMEOUT_S = 30
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +41,8 @@ def search_web(query: str, max_results: int = None) -> List[Dict]:
             from ddgs import DDGS
         except ImportError:
             from duckduckgo_search import DDGS  # fallback to old package name
-        with DDGS() as ddgs:
+        # timeout=15 sets the per-request socket timeout in primp's HTTP client
+        with DDGS(timeout=15) as ddgs:
             raw = list(ddgs.text(query, max_results=n))
         return [
             {
@@ -49,21 +55,37 @@ def search_web(query: str, max_results: int = None) -> List[Dict]:
         ]
 
     last_error: Exception = Exception("No attempts made")
+    deadline = time.monotonic() + _SEARCH_HARD_TIMEOUT_S
+
     for attempt, wait in enumerate(DDG_BACKOFF_DELAYS, start=1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.error("[Search] Hard timeout reached before attempt %d", attempt)
+            break
         try:
-            results = _run()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_run)
+                results = future.result(timeout=remaining)
             if attempt > 1:
                 logger.info(f"[Search] Succeeded on attempt {attempt}.")
             logger.info(f"[Search] '{query[:70]}' → {len(results)} results")
             return results
+        except FuturesTimeoutError:
+            logger.error(
+                "[Search] DDG call timed out after %.0fs (attempt %d/%d)",
+                remaining, attempt, len(DDG_BACKOFF_DELAYS),
+            )
+            break  # no point retrying — network is stuck
         except Exception as e:
             last_error = e
             if attempt < len(DDG_BACKOFF_DELAYS):
-                logger.warning(
-                    f"[Search] DuckDuckGo error (attempt {attempt}/{len(DDG_BACKOFF_DELAYS)}): "
-                    f"{e} — retrying in {wait} s"
-                )
-                time.sleep(wait)
+                sleep_s = min(wait, deadline - time.monotonic())
+                if sleep_s > 0:
+                    logger.warning(
+                        f"[Search] DuckDuckGo error (attempt {attempt}/{len(DDG_BACKOFF_DELAYS)}): "
+                        f"{e} — retrying in {sleep_s:.0f}s"
+                    )
+                    time.sleep(sleep_s)
             else:
                 logger.error(f"[Search] All {len(DDG_BACKOFF_DELAYS)} attempts failed: {e}")
 
