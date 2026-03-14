@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Deep Research AI</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='28'>🔬</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/main.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+<div class="layout">
+
+  <!-- ═══════════════════ Left Sidebar ═══════════════════ -->
+  <aside class="sidebar">
+
+    <div class="sidebar-logo">
+      <div class="logo-icon">🔬</div>
+      <div class="logo-text">
+        <h1>Deep Research AI</h1>
+        <span>Local · Apple Silicon M4</span>
+      </div>
+    </div>
+
+    <nav class="mode-nav">
+      <button class="mode-btn active" id="btn-chat" onclick="switchMode('chat')">
+        <span class="mode-icon">💬</span>
+        <div class="mode-label"><strong>Chat</strong><span>Quick answers</span></div>
+      </button>
+      <button class="mode-btn" id="btn-research" onclick="switchMode('research')">
+        <span class="mode-icon">🔍</span>
+        <div class="mode-label"><strong>Deep Research</strong><span>Full web analysis</span></div>
+      </button>
+    </nav>
+
+    <div class="sidebar-section">Model</div>
+    <div class="model-badge" id="model-info">
+      <div class="model-name">Loading…</div>
+      <div class="model-status"><span class="status-dot yellow"></span>Connecting…</div>
+    </div>
+
+    <div class="sidebar-section">Files</div>
+    <div class="upload-zone" onclick="document.getElementById('file-input').click()">
+      <div class="upload-icon">📎</div>
+      <span>Attach files</span>
+      <span class="upload-hint">PDF · DOCX · TXT · MD</span>
+    </div>
+    <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt,.md,.csv"
+           style="display:none" onchange="handleFileSelect(event)" />
+    <div class="files-list" id="files-list"></div>
+
+    <div class="sidebar-section metrics-section">Hardware · M4</div>
+    <div class="metrics-panel">
+
+      <div class="metric-block">
+        <div class="metric-header">
+          <span class="metric-label">⚙️ CPU</span>
+          <span class="metric-pct" id="m-cpu-pct">—</span>
+        </div>
+        <div class="metrics-bar-wrap"><div class="metrics-bar-fill" id="m-cpu-bar"></div></div>
+        <div class="per-core-wrap" id="m-per-core"></div>
+        <div class="metric-stats">
+          <div class="metric-row"><span>Cores</span><span id="m-cpu-cores">—</span></div>
+          <div class="metric-row"><span>Freq</span><span id="m-cpu-freq">—</span></div>
+          <div class="metric-row"><span>Load avg</span><span id="m-load">—</span></div>
+        </div>
+      </div>
+
+      <hr class="metric-divider" />
+
+      <div class="metric-block">
+        <div class="metric-header">
+          <span class="metric-label">🧠 RAM (Unified)</span>
+          <span class="metric-pct" id="m-ram-pct">—</span>
+        </div>
+        <div class="metrics-bar-wrap"><div class="metrics-bar-fill" id="m-ram-bar"></div></div>
+        <div class="metric-stats">
+          <div class="metric-row"><span>Used / Total</span><span id="m-ram-used">—</span></div>
+          <div class="metric-row"><span>Available</span><span id="m-ram-avail">—</span></div>
+          <div class="metric-row"><span>Swap</span><span id="m-swap-used">—</span></div>
+        </div>
+      </div>
+
+      <hr class="metric-divider" />
+
+      <div class="metric-block">
+        <div class="metric-header">
+          <span class="metric-label">🎮 GPU (Metal)</span>
+          <span class="metric-pct" id="m-gpu-pct">—</span>
+        </div>
+        <div class="metrics-bar-wrap"><div class="metrics-bar-fill" id="m-gpu-bar"></div></div>
+        <div class="metric-stats">
+          <div class="metric-row"><span>Renderer</span><span id="m-gpu-renderer">—</span></div>
+          <div class="metric-row"><span>Tiler</span><span id="m-gpu-tiler">—</span></div>
+        </div>
+        <div class="metric-header" style="margin-top:6px">
+          <span class="metric-label">VRAM</span>
+          <span class="metric-pct" id="m-vram-pct">—</span>
+        </div>
+        <div class="metrics-bar-wrap"><div class="metrics-bar-fill" id="m-vram-bar"></div></div>
+        <div class="metric-stats">
+          <div class="metric-row"><span>In use</span><span id="m-gpu-vram-used">—</span></div>
+          <div class="metric-row"><span>Allocated</span><span id="m-gpu-vram-alloc">—</span></div>
+        </div>
+      </div>
+
+      <hr class="metric-divider" />
+
+      <div class="metric-block">
+        <div class="metric-header">
+          <span class="metric-label">💾 Disk (SSD)</span>
+          <span class="metric-pct" id="m-disk-pct">—</span>
+        </div>
+        <div class="metrics-bar-wrap"><div class="metrics-bar-fill" id="m-disk-bar"></div></div>
+        <div class="metric-stats">
+          <div class="metric-row"><span>Free</span><span id="m-disk-free">—</span></div>
+          <div class="metric-row"><span>Total</span><span id="m-disk-total">—</span></div>
+        </div>
+      </div>
+
+      <div class="metric-block" id="m-ext-disk-row" style="display:none">
+        <div class="metric-header">
+          <span class="metric-label">🔴 T7 Shield</span>
+          <span class="metric-pct" id="m-ext-disk-pct">—</span>
+        </div>
+        <div class="metrics-bar-wrap"><div class="metrics-bar-fill" id="m-ext-disk-bar"></div></div>
+        <div class="metric-stats">
+          <div class="metric-row"><span>Free</span><span id="m-ext-disk-free">—</span></div>
+        </div>
+      </div>
+
+      <hr class="metric-divider" />
+
+      <div class="metric-block">
+        <div class="metric-header">
+          <span class="metric-label">🖥 Server Process</span>
+        </div>
+        <div class="metric-stats">
+          <div class="metric-row"><span>RSS</span><span id="m-proc-rss">—</span></div>
+          <div class="metric-row"><span>CPU</span><span id="m-proc-cpu">—</span></div>
+          <div class="metric-row"><span>Threads</span><span id="m-proc-threads">—</span></div>
+        </div>
+      </div>
+
+      <div class="metrics-ts" id="m-timestamp"></div>
+    </div>
+
+    <!-- AI Performance Insights -->
+    <div class="sidebar-section metrics-section" style="margin-top:10px">
+      ⚡ AI Performance
+      <button class="insights-refresh-btn" onclick="fetchInsights()" title="Refresh insights">↺</button>
+    </div>
+    <div class="insights-panel" id="insights-panel">
+      <div class="insights-empty" id="insights-empty">No inference data yet</div>
+      <div id="insights-body" style="display:none">
+        <div class="insights-row">
+          <span class="insights-lbl">Avg tok/s</span>
+          <span class="insights-val" id="ins-tps">—</span>
+        </div>
+        <div class="insights-row">
+          <span class="insights-lbl">Total requests</span>
+          <span class="insights-val" id="ins-reqs">—</span>
+        </div>
+        <div class="insights-tiers" id="ins-tiers"></div>
+        <div class="insights-recs" id="ins-recs"></div>
+      </div>
+    </div>
+
+    <div class="sidebar-footer">DeepSeek R1 8B · Qwen2.5 7B · MLX</div>
+  </aside>
+
+  <!-- ═══════════════════ Main ═══════════════════ -->
+  <main class="main">
+
+    <!-- Chat View -->
+    <div class="view active" id="view-chat">
+      <div class="messages" id="chat-messages">
+        <div class="empty-state" id="chat-empty">
+          <div class="empty-hero">🤖</div>
+          <h2>What can I help with?</h2>
+          <p>Chat with a fully local AI — no cloud, no data leaving your Mac.</p>
+          <div class="suggestion-grid">
+            <button class="suggestion" onclick="fillPrompt('Explain how unified memory works on Apple Silicon')">Explain Apple Silicon memory</button>
+            <button class="suggestion" onclick="fillPrompt('What are the best open source LLMs in 2026?')">Best open LLMs 2026</button>
+            <button class="suggestion" onclick="fillPrompt('Summarize the key concepts of RAG systems')">RAG systems explained</button>
+            <button class="suggestion" onclick="fillPrompt('How does vector similarity search work?')">Vector similarity search</button>
+            <button class="suggestion" onclick="fillPrompt('latest AI research news today')">🌐 Latest AI news today</button>
+            <button class="suggestion" onclick="fillPrompt('recent tech breakthroughs this week')">🌐 Recent tech breakthroughs</button>
+          </div>
+        </div>
+      </div>
+      <div class="input-bar">
+        <div class="input-wrap">
+          <textarea id="prompt-input" rows="1" placeholder="Message Deep Research AI…"
+                    onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+          <button class="send-btn" id="send-btn" onclick="handleSend()" title="Send (Enter)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+        <div class="input-hint">Enter to send · Shift+Enter for new line</div>
+      </div>
+    </div>
+
+    <!-- Research View -->
+    <div class="view" id="view-research">
+
+      <div class="crawl-panel" id="crawl-panel">
+        <div class="crawl-inner">
+          <div class="crawl-header">
+            <span class="crawl-title">🌐 Live Web Search  <span id="crawl-phase-label" style="color:var(--accent);font-size:10px;font-weight:700;margin-left:6px;"></span></span>
+            <div class="crawl-stats">
+              <div class="crawl-stat"><span class="crawl-stat-num" id="crawl-queries-n">0</span><span>queries</span></div>
+              <div class="crawl-stat"><span class="crawl-stat-num" id="crawl-urls-n">0</span><span>URLs</span></div>
+              <div class="crawl-stat"><span class="crawl-stat-num" id="crawl-stored-n">0</span><span>stored</span></div>
+              <div class="crawl-stat"><span class="crawl-stat-num" id="crawl-sites-n">0</span><span>sites</span></div>
+            </div>
+            <button class="crawl-toggle" id="crawl-collapse-btn" onclick="toggleCrawlPanel()">▲ hide</button>
+          </div>
+          <div class="crawl-phase-bar"><div class="crawl-phase-fill" id="crawl-phase-fill"></div></div>
+          <div class="crawl-feed" id="crawl-feed"></div>
+        </div>
+      </div>
+
+      <div class="research-layout">
+
+        <div class="research-panel">
+          <div class="panel-heading">Progress</div>
+          <div class="progress-bar-wrap"><div class="progress-bar" id="progress-bar"></div></div>
+          <div id="progress-label" style="font-size:12px;color:var(--muted);margin-top:4px">Idle</div>
+          <div class="panel-heading">Steps</div>
+          <ul class="step-list" id="step-list"></ul>
+          <div class="panel-heading" style="margin-top:8px">Sources <span id="source-count" style="color:var(--accent);font-weight:700"></span></div>
+          <div id="sources-list" style="display:flex;flex-direction:column;gap:6px;"></div>
+          <button class="kg-show-btn" id="kg-show-btn" onclick="showKG()">🧠 Show Knowledge Graph</button>
+        </div>
+
+        <div class="research-content" id="research-content">
+          <div class="report-placeholder" id="research-placeholder">
+            <div class="big-icon">🔬</div>
+            <h3 style="color:var(--text);font-size:20px;font-weight:700">Deep Research</h3>
+            <p>Enter a query below. The AI will plan, search, scrape, and synthesise a full report.</p>
+            <div class="suggestion-grid">
+              <button class="suggestion" onclick="fillResearchPrompt('Latest developments in AI chip design 2025')">AI chip trends 2025</button>
+              <button class="suggestion" onclick="fillResearchPrompt('OpenAI business model and revenue breakdown')">OpenAI business model</button>
+              <button class="suggestion" onclick="fillResearchPrompt('Apple Vision Pro market performance and reviews')">Apple Vision Pro</button>
+              <button class="suggestion" onclick="fillResearchPrompt('Quantum computing progress and timeline')">Quantum computing</button>
+            </div>
+          </div>
+
+          <details class="think-block" id="think-block" style="display:none">
+            <summary class="think-summary">
+              <span class="think-spinner" id="think-spinner"></span>
+              <span id="think-summary-text">Thinking…</span>
+              <span class="think-toggle-hint">click to expand</span>
+            </summary>
+            <div class="think-body" id="think-body"></div>
+          </details>
+
+          <!-- AI I/O debug panel — shows every prompt + response + think block -->
+          <details class="aio-block" id="aio-block" style="display:none">
+            <summary class="aio-summary">
+              <span class="aio-icon">🤖</span>
+              <span id="aio-summary-text">AI Interactions</span>
+              <span class="think-toggle-hint">click to expand</span>
+            </summary>
+            <div class="aio-body" id="aio-body"></div>
+          </details>
+
+          <div id="report-output" style="display:none"></div>
+
+          <div id="report-actions" style="display:none;padding:12px 0 4px;gap:8px;flex-wrap:wrap;align-items:center;">
+            <button class="btn btn-primary" onclick="downloadReport('md')">⬇ Markdown</button>
+            <button class="btn btn-secondary" onclick="downloadReport('txt')">⬇ Text</button>
+            <button class="btn btn-secondary" onclick="downloadReportPDF()">⬇ PDF</button>
+            <button class="btn btn-secondary" onclick="copyReport(event)">📋 Copy</button>
+            <span id="report-meta" style="font-size:11px;color:var(--muted);margin-left:4px"></span>
+          </div>
+        </div>
+
+        <div class="kg-panel" id="kg-panel">
+          <div class="kg-header">
+            <span class="panel-heading">Knowledge Graph</span>
+            <button class="kg-toggle-btn" onclick="hideKG()">✕</button>
+          </div>
+          <div class="kg-stats">
+            <div class="kg-stat"><div class="kg-num" id="kg-node-count">0</div><div class="kg-lbl">Entities</div></div>
+            <div class="kg-stat"><div class="kg-num" id="kg-edge-count">0</div><div class="kg-lbl">Relations</div></div>
+          </div>
+          <div class="panel-heading">Entities</div>
+          <div class="kg-node-list" id="kg-node-list">
+            <div style="font-size:12px;color:var(--muted);text-align:center;padding:16px 0">Entities will appear<br>as research runs…</div>
+          </div>
+          <div class="panel-heading" style="margin-top:8px">Relations</div>
+          <div class="kg-edge-list" id="kg-edge-list">
+            <div style="font-size:11px;color:var(--muted);text-align:center;padding:8px 0">No relations yet</div>
+          </div>
+        </div>
+
+      </div><!-- .research-layout -->
+
+      <div class="input-bar">
+        <div class="input-wrap">
+          <textarea id="research-input" rows="1" placeholder="Enter research query…"
+                    onkeydown="handleResearchKey(event)" oninput="autoResize(this)"></textarea>
+          <button class="send-btn" id="research-btn" onclick="startResearch()" title="Start research">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="input-hint">Enter to start research · Shift+Enter for new line</div>
+      </div>
+    </div><!-- #view-research -->
+
+  </main>
+</div>
+
+<script src="js/utils.js"></script>
+<script src="js/app.js"></script>
+<script src="js/metrics.js"></script>
+<script src="js/crawl.js"></script>
+<script src="js/upload.js"></script>
+<script src="js/kg.js"></script>
+<script src="js/chat.js"></script>
+<script src="js/report.js"></script>
+<script src="js/research.js"></script>
+</body>
+</html>

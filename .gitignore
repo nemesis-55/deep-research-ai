@@ -1,0 +1,57 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Data / model cache (heavy assets on external drive) ───────────────────────
+data/
+model_cache/
+hf_cache/
+vector_db/
+uploads/
+knowledge_graph.json
+
+# ── Model files (too large for git) ───────────────────────────────────────────
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+
+# ── Logs & metrics (runtime-generated, not source code) ───────────────────────
+logs/
+*.jsonl
+
+# ── Backup files ──────────────────────────────────────────────────────────────
+*.bak
+*.orig
+*.swp
+*~
+
+# ── Tilde dir (accidental mkdir ~) ────────────────────────────────────────────
+~/
+
+# ── HuggingFace local cache inside project ────────────────────────────────────
+.cache/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db

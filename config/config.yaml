@@ -1,0 +1,129 @@
+huggingface:
+  # Leave blank — token is loaded from the .env file or HF_TOKEN env variable.
+  token: ""
+
+# ── Storage paths ─────────────────────────────────────────────────────────────
+# hf_cache → internal NVMe SSD (3.3 GB/s) for fast model weight loading.
+#            MLX safetensors copied here from T7 Shield — see scripts/start.py.
+# Everything else (uploads, vector_db, GGUF models) stays on T7 Shield.
+storage:
+  base:            "/Volumes/T7 Shield/DeepResearchAI"
+  models:          "/Volumes/T7 Shield/DeepResearchAI/model_cache"
+  vector_db:       "/Volumes/T7 Shield/DeepResearchAI/vector_db"
+  uploads:         "/Volumes/T7 Shield/DeepResearchAI/uploads"
+  knowledge_graph: "/Volumes/T7 Shield/DeepResearchAI/knowledge_graph.json"
+  hf_cache:        "~/.cache/huggingface/hub"
+
+# ── Model registry ────────────────────────────────────────────────────────────
+# runtime:   "llama_cpp" (primary — most memory-efficient on Apple Silicon Metal)
+#            "mlx"       (alternative — requires mlx-lm installed)
+# All models load from GGUF files on the external drive.
+# Models are NEVER loaded simultaneously — swap_model() enforces this.
+#
+# 16 GB budget:
+#   planner  (DeepSeek-R1 8B  Q4_K_M) ≈ 5.5 GB
+#   writer   (Qwen2.5-7B      Q4_K_M) ≈ 4.8 GB
+#   chat     (Qwen2.5-7B      Q4_K_M) ≈ 4.8 GB  ← same file, different role
+#   embedder (bge-small-en)            ≈ 0.1 GB  ← stays loaded always
+#   OS + pipeline overhead             ≈ 2–3 GB
+#   Total peak (one model at a time)  ≈ 8–9 GB  ✅ safe
+models:
+  planner:
+    name:           "DeepSeek-R1-Distill-Llama-8B (Q4_K_M GGUF)"
+    runtime:        llama_cpp
+    gguf_path:      "/Volumes/T7 Shield/DeepResearchAI/model_cache/deepseek_r1_8b_q4.gguf"
+    gguf_repo:      "bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF"
+    gguf_filename:  "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
+    mlx_repo:       "mlx-community/DeepSeek-R1-Distill-Llama-8B-4bit"
+    context_length: 8192
+    max_new_tokens: 1024
+    temperature:    0.6
+
+  writer:
+    name:           "Qwen2.5-7B-Instruct (MLX 4-bit)"
+    runtime:        mlx
+    gguf_path:      "/Volumes/T7 Shield/DeepResearchAI/model_cache/qwen25_7b_q4.gguf"
+    gguf_repo:      "Qwen/Qwen2.5-7B-Instruct-GGUF"
+    gguf_filename:  "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+    mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
+    context_length: 16384
+    max_new_tokens: 4096
+    temperature:    0.7
+
+  chat:
+    name:           "Qwen2.5-7B-Instruct (MLX 4-bit)"
+    runtime:        mlx
+    gguf_path:      "/Volumes/T7 Shield/DeepResearchAI/model_cache/qwen25_7b_q4.gguf"
+    gguf_repo:      "Qwen/Qwen2.5-7B-Instruct-GGUF"
+    gguf_filename:  "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
+    mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
+    context_length: 8192
+    max_new_tokens: 1024
+    temperature:    0.7
+
+  embedding:
+    name:    "BAAI/bge-small-en-v1.5"
+    hf_repo: "BAAI/bge-small-en-v1.5"
+
+server:
+  host: 0.0.0.0
+  port: 8000
+
+search:
+  max_results: 8
+  max_pages_to_scrape: 5
+
+vector_db:
+  collection:    research_memory
+  chunk_size:    1000
+  chunk_overlap: 150
+
+knowledge_graph:
+  max_entities_per_source: 20
+  min_confidence: 0.5
+
+research:
+  max_results_per_task: 8
+  max_pages_per_task:   5
+  research_loops:       3
+  max_content_chars:    30000
+  chunk_size:           1000
+  chunk_overlap:        150
+  extract_images:       true
+  extract_youtube:      true
+  follow_links:         true
+  follow_links_depth:   1
+  max_follow_links:     3
+  sequential_loading:   true
+  source_min_score:     50
+
+generation:
+  top_p:     0.9
+  do_sample: true
+
+# ── Metrics logging ───────────────────────────────────────────────────────────
+# Hardware + inference metrics are written as JSONL to logs/metrics/.
+# Each line is a JSON object.  Two record types:
+#   "hw"        — periodic hardware snapshot (CPU/RAM/GPU/disk/process)
+#   "inference" — one record per generation (role, tokens, elapsed, tok/s)
+#   "startup" / "shutdown" / custom events
+#
+# interval_s — how often to sample hardware (default 30 s)
+# keep_days  — delete daily files older than this (default 7)
+# dir        — relative to project root; absolute paths also accepted
+metrics_log:
+  dir:        "logs/metrics"
+  interval_s: 30
+  keep_days:  7
+
+# ── Deep multi-query crawl (Phase 0) ─────────────────────────────────────────
+# Runs BEFORE the main planner to pre-populate the vector store with real web
+# evidence.  All values can be tuned without touching Python code.
+deep_crawl:
+  enabled:           true   # set false to skip Phase 0 entirely
+  num_queries:       10     # how many search queries to generate
+  results_per_query: 10     # DDG results to fetch per query (10×10 = 100 URLs)
+  max_articles:      30     # how many articles to actually scrape
+  min_doc_chars:     200    # discard pages shorter than this
+  refine_threshold:  8      # if stored docs < this, run a second search round
+  rag_top_k:         10     # passages retrieved from vector store for report synthesis
