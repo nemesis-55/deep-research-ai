@@ -601,20 +601,48 @@ def _score_confidence(scraped_texts: list[str], result_snippets: list[str]) -> f
 
 def _chat_web_search(query: str, max_pages: int = CHAT_SCRAPE_MAX_URLS) -> str:
     """
-    Scrape up to `max_pages` pages for the query.
-    Confidence check still used for the auto-detect path; when called with
-    max_pages == CHAT_SCRAPE_MAX_URLS (default) it always scrapes all pages.
-    Full text of each page is included — no per-page truncation.
+    Improved chat web search:
+      1. Fan-out 2 queries (base + year-qualified) for broader coverage
+      2. Domain-filter results to credible sources
+      3. Scrape top pages concurrently (sync loop)
+      4. Semantically rank chunks against the query
+      5. Return top evidence as context for the LLM
+
+    max_pages: how many pages to scrape (auto=3, forced=10).
     """
     from backend.tools.web_search import search_web
     from backend.tools.page_scraper import scrape_page
+    from backend.tools.url_filter import filter_results
+    from backend.tools.document_chunks import chunk_documents, rank_chunks, build_evidence_context
 
-    results = search_web(query, max_results=CHAT_SEARCH_MAX_RESULTS)
-    if not results:
-        return ""
+    import datetime
+    year = datetime.date.today().year
 
+    # ── 1. Generate 2 queries ─────────────────────────────────────────────
+    queries = [query, f"{query} {year}"]
+    seen_urls: set[str] = set()
+    all_results: list[dict] = []
+
+    for q in queries:
+        raw = search_web(q, max_results=CHAT_SEARCH_MAX_RESULTS)
+        for r in raw:
+            url = r.get("url", "")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                all_results.append(r)
+
+    logger.info(f"[Chat] 🌐 {len(all_results)} unique URLs from {len(queries)} queries")
+
+    # ── 2. Domain filter ──────────────────────────────────────────────────
+    filtered = filter_results(all_results, log_prefix="[Chat]")
+    logger.info(f"[Chat] After domain filter: {len(filtered)} URLs")
+
+    # Fall back to unfiltered if domain filter removes everything
+    candidates = filtered if filtered else all_results
+
+    # Build DDG snippet header (always shown regardless of scraping)
     lines = [f"## Live web search results for: {query}\n"]
-    for i, r in enumerate(results[:CHAT_SEARCH_MAX_RESULTS], 1):
+    for i, r in enumerate(candidates[:CHAT_SEARCH_MAX_RESULTS], 1):
         title   = r.get("title", "")
         url     = r.get("url", "")
         snippet = r.get("snippet", "").strip()
@@ -624,12 +652,15 @@ def _chat_web_search(query: str, max_pages: int = CHAT_SCRAPE_MAX_URLS) -> str:
             lines.append(f"   {snippet[:200]}")
         lines.append("")
 
-    snippets       = [r.get("snippet", "") for r in results]
+    snippets       = [r.get("snippet", "") for r in candidates]
     scraped_texts: list[str] = []
+    pages:         list[dict] = []
     scraped_count  = 0
 
-    for idx, r in enumerate(results):
-        url = r.get("url", "")
+    # ── 3. Scrape pages ───────────────────────────────────────────────────
+    for r in candidates:
+        url   = r.get("url", "")
+        title = r.get("title", url)
         if not url:
             continue
 
@@ -638,14 +669,15 @@ def _chat_web_search(query: str, max_pages: int = CHAT_SCRAPE_MAX_URLS) -> str:
             text = (page.get("text") or "").strip()
             if len(text) > CHAT_SCRAPE_MIN_USEFUL_CHARS:
                 scraped_texts.append(text)
+                pages.append({"url": url, "title": title, "text": text})
                 scraped_count += 1
                 logger.debug(f"[Chat] Scraped {len(text):,} chars from {url[:60]}")
             else:
-                logger.debug(f"[Chat] Skipped stub page ({len(text)} chars): {url[:60]}")
+                logger.debug(f"[Chat] Skipped stub ({len(text)} chars): {url[:60]}")
         except Exception as e:
-            logger.debug(f"[Chat] Page scrape failed for {url}: {e}")
+            logger.debug(f"[Chat] Scrape failed {url}: {e}")
 
-        # ── After initial pass: score confidence (auto mode only) ─────────
+        # ── Confidence gate for auto-mode ─────────────────────────────────
         if scraped_count == CHAT_SCRAPE_INITIAL_URLS and max_pages == CHAT_SCRAPE_INITIAL_URLS:
             confidence = _score_confidence(scraped_texts, snippets)
             logger.info(
@@ -660,12 +692,29 @@ def _chat_web_search(query: str, max_pages: int = CHAT_SCRAPE_MAX_URLS) -> str:
             logger.info(f"[Chat] 🔢 Reached max scrape limit ({max_pages} pages)")
             break
 
-    # ── Build article section — full text, no per-page truncation ─────────
-    if scraped_texts:
-        for i, (r, text) in enumerate(zip(results, scraped_texts)):
+    # ── 4. Semantic ranking of chunks ─────────────────────────────────────
+    if pages:
+        try:
+            top_k    = 10   # keep top 10 chunks for chat (fast)
+            chunks   = chunk_documents(pages)
+            ranked   = rank_chunks(query, chunks, top_k=top_k)
+            evidence = build_evidence_context(ranked, max_chars=CHAT_SCRAPE_MAX_CHARS)
+            if evidence:
+                lines.append("\n### Ranked Evidence\n")
+                lines.append(evidence)
+        except Exception as e:
+            logger.warning(f"[Chat] Semantic ranking failed ({e}), using raw text")
+            # Plain fallback: include raw scraped text
+            for i, (r, text) in enumerate(zip(candidates, scraped_texts)):
+                lines.append(f"### Article {i+1}: {r.get('title', '')}")
+                lines.append(f"Source: {r.get('url', '')}")
+                lines.append(text[:4000])
+                lines.append("")
+    elif scraped_texts:
+        for i, (r, text) in enumerate(zip(candidates, scraped_texts)):
             lines.append(f"### Article {i+1}: {r.get('title', '')}")
             lines.append(f"Source: {r.get('url', '')}")
-            lines.append(text)
+            lines.append(text[:4000])
             lines.append("")
 
     final_confidence = _score_confidence(scraped_texts, snippets) if scraped_texts else 0.0
@@ -675,7 +724,8 @@ def _chat_web_search(query: str, max_pages: int = CHAT_SCRAPE_MAX_URLS) -> str:
         f"total chars={sum(len(t) for t in scraped_texts):,} · "
         f"query={query[:60]!r}"
     )
-    return "\n".join(lines)
+    context = "\n".join(lines)
+    return context[:CHAT_SCRAPE_MAX_CHARS]
 
 
 def _classify_prompt(message: str) -> str:

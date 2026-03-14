@@ -1,16 +1,29 @@
 """
 Report Agent — Deep Research AI
 
-Design pattern: Builder — assembles the final Markdown report incrementally:
-  executive summary → per-task sections → image gallery → YouTube section
-  → source references → conclusion.
-  Each build step is a private _build_* method; generate_report() is the Director.
-Uses the Qwen Writer model for all LLM calls.
+Design pattern: Builder — assembles the final Markdown report incrementally.
+
+Flow
+────
+  1. Group sources by research task
+  2. Build per-section evidence from semantically ranked chunks
+  3. Generate each section with Qwen writer (grounded-only, cite inline)
+  4. Validate citations — strip hallucinated URLs
+  5. Write Executive Summary + Conclusion
+  6. Append validated sources section
+
+Citation guarantee: every URL in the Sources section was actually scraped.
 """
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from backend.model_loader import generate_text
+from backend.tools.evidence_builder import (
+    EvidenceResult,
+    build_evidence,
+    validate_citations,
+    sources_section,
+)
 from backend.tools.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -18,52 +31,50 @@ logger = logging.getLogger(__name__)
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 _SECTION_PROMPT = """\
-You are a world-class research analyst writing one section of a deep-dive report.
+You are a world-class research analyst. Write one section of a deep-dive research report.
 
 Report Topic: {query}
-This Section: {section_topic}
+Section: {section_topic}
 
-Research Evidence:
+Research Evidence (use ONLY what is provided below — do not add external knowledge):
 {evidence}
 
-Write a thorough section (500-800 words) with:
-- ## heading matching the section topic
-- ### sub-headings where appropriate
-- Specific facts, numbers, quotes from the evidence
-- Inline citations as [Title](URL)
-- Bullet lists for key data points
-
-Do NOT write an intro or conclusion. Use ONLY the evidence provided."""
+Requirements:
+- Start with ## heading matching the section topic
+- Use ### sub-headings for major sub-points
+- Cite every claim inline as [Title](URL) using only URLs that appear in the evidence above
+- Include specific facts, numbers, dates, and direct quotes where present
+- Use bullet points for lists of data or findings
+- Length: 400–700 words
+- Do NOT invent URLs or cite sources not in the evidence"""
 
 _EXEC_SUMMARY_PROMPT = """\
 You are writing the Executive Summary of a major research report.
 
-Query: {query}
+Topic: {query}
 
-Section previews:
+Section previews (already written — summarise these, do not add new facts):
 {sections_preview}
 
-Write a powerful Executive Summary (300-400 words):
+Write a powerful Executive Summary (250–350 words):
 - Open with the single most important finding
-- Cover all key themes
-- Highlight critical data points
-
-Use ## Executive Summary as the heading."""
+- Cover all key themes from the sections
+- Include the most critical numbers or dates
+- Use ## Executive Summary as the heading"""
 
 _CONCLUSION_PROMPT = """\
 You are writing the Conclusion of a major research report.
 
-Query: {query}
+Topic: {query}
 
-Key Findings:
+Key findings from the report:
 {key_findings}
 
-Write a strong Conclusion (200-300 words):
+Write a concise Conclusion (150–250 words):
 - Synthesise the most important insights
-- Forward-looking implications
-- No new facts
-
-Use ## Conclusion as the heading."""
+- Include forward-looking implications
+- Do NOT introduce new facts not already in the key findings
+- Use ## Conclusion as the heading"""
 
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
@@ -74,7 +85,7 @@ class ReportAgent:
     def __init__(self, vector_store: VectorStore) -> None:
         self.vector_store = vector_store
 
-    # ── Private builders ──────────────────────────────────────────────────────
+    # ── Private helpers ───────────────────────────────────────────────────────
 
     def _group_by_task(self, sources: List[Dict]) -> Dict[str, List[Dict]]:
         grouped: Dict[str, List[Dict]] = {}
@@ -91,24 +102,27 @@ class ReportAgent:
                 if url and url not in seen:
                     seen.add(url)
                     images.append(img)
-        return images[:30]
+        return images[:20]
 
-    def _build_evidence(self, task_sources: List[Dict]) -> str:
-        parts = []
-        for s in task_sources[:5]:
-            text  = s.get("analysis") or s.get("text", "")
-            url   = s.get("url", "")
-            title = s.get("title", url)
-            if text:
-                parts.append(f"### {title}\nURL: {url}\n\n{text[:2500]}")
-        return "\n\n---\n\n".join(parts)[:8000]
+    def _pages_from_sources(self, task_sources: List[Dict]) -> List[Dict]:
+        """Convert source dicts back into page dicts for evidence_builder."""
+        pages = []
+        for s in task_sources:
+            text = s.get("analysis") or s.get("text", "")
+            url  = s.get("url", "")
+            if text and url and not url.startswith("synthesis://"):
+                pages.append({
+                    "url":   url,
+                    "title": s.get("title", url),
+                    "text":  text,
+                })
+        return pages
 
     def _build_image_gallery(self, images: List[Dict]) -> str:
         if not images:
             return ""
-        lines = ["\n\n## 📷 Visual Evidence\n",
-                 "> All images sourced from research references.\n"]
-        for img in images[:20]:
+        lines = ["\n\n## 📷 Visual Evidence\n"]
+        for img in images[:15]:
             url     = img.get("url", "")
             alt     = img.get("alt", "") or img.get("caption", "") or "Image"
             caption = img.get("caption", "") or alt
@@ -130,70 +144,124 @@ class ReportAgent:
         if not embeds:
             return ""
         lines = ["\n\n## 🎥 Video Sources\n"]
-        for yt in embeds[:8]:
+        for yt in embeds[:5]:
             url        = yt.get("url", "")
             transcript = yt.get("transcript", "")
             lines.append(f"**[{url}]({url})**")
             if transcript:
-                lines.append(f"\n> {transcript[:400]}…\n")
-        return "\n".join(lines)
-
-    def _build_sources_section(self, sources: List[Dict]) -> str:
-        seen: set = set()
-        lines = ["\n\n## 📚 Sources & References\n"]
-        i = 1
-        for s in sources:
-            url   = s.get("url", "")
-            title = s.get("title", url)
-            if url and url not in seen:
-                seen.add(url)
-                lines.append(f"{i}. [{title}]({url})")
-                i += 1
+                lines.append(f"\n> {transcript[:300]}…\n")
         return "\n".join(lines)
 
     # ── Director method ───────────────────────────────────────────────────────
 
-    def generate_report(self, query: str, all_sources: List[Dict]) -> str:
+    def generate_report(
+        self,
+        query:       str,
+        all_sources: List[Dict],
+        rag_context: str = "",
+    ) -> str:
         logger.info(f"[Report] Generating for: {query} ({len(all_sources)} sources)")
 
         grouped    = self._group_by_task(all_sources)
         all_images = self._collect_images(all_sources)
         sections:  List[str] = []
 
+        # Track all validated URLs so the final sources section is clean
+        all_validated_sources: List[Dict] = []
+
         for task, task_sources in grouped.items():
             logger.info(f"[Report] Section: {task[:70]}")
-            evidence = self._build_evidence(task_sources)
-            if not evidence.strip():
+
+            # ── Semantic evidence build for this section ───────────────────
+            pages = self._pages_from_sources(task_sources)
+
+            # Also splice in RAG context as a synthetic page (first section only)
+            if rag_context and not sections:
+                pages.insert(0, {
+                    "url":   "rag://vector-store",
+                    "title": "Vector Store RAG Context",
+                    "text":  rag_context[:8000],
+                })
+
+            if not pages:
                 continue
-            section = generate_text(
-                _SECTION_PROMPT.format(query=query, section_topic=task, evidence=evidence),
-                max_new_tokens=1200, role="writer",
+
+            ev: EvidenceResult = build_evidence(task, pages, top_k=20, max_chars=15_000)
+
+            if not ev.context.strip():
+                continue
+
+            # Add this section's sources to the global validated list
+            all_validated_sources.extend(ev.sources)
+
+            # ── LLM section generation ─────────────────────────────────────
+            # Budget: 800 tok @ 19.4 tok/s ≈ 41 s per section (was 1000 = 51 s)
+            raw_section = generate_text(
+                _SECTION_PROMPT.format(
+                    query          = query,
+                    section_topic  = task,
+                    evidence       = ev.context,
+                ),
+                max_new_tokens=800, role="writer",
             )
-            if section.strip():
-                sections.append(section.strip())
+
+            # ── Citation validation ────────────────────────────────────────
+            # Only URLs actually crawled are permitted in the output
+            allowed = ev.allowed_urls | frozenset({"rag://vector-store"})
+            clean_section, hallucinated = validate_citations(raw_section, allowed, strict=False)
+            if hallucinated:
+                logger.warning(
+                    f"[Report] Section '{task[:40]}': "
+                    f"{len(hallucinated)} hallucinated URL(s) marked ⚠"
+                )
+
+            if clean_section.strip():
+                sections.append(clean_section.strip())
 
         if not sections:
             return f"# Research Report: {query}\n\n⚠️ Insufficient data collected."
 
-        # Executive summary
+        # ── Executive summary ──────────────────────────────────────────────
         logger.info("[Report] Executive summary…")
+        # Budget: 500 tok @ 19.4 tok/s ≈ 26 s (was 600 = 31 s)
         exec_summary = generate_text(
             _EXEC_SUMMARY_PROMPT.format(
-                query=query,
-                sections_preview="\n\n".join(s[:500] for s in sections[:6]),
-            ),
-            max_new_tokens=700, role="writer",
-        )
-
-        # Conclusion
-        logger.info("[Report] Conclusion…")
-        conclusion = generate_text(
-            _CONCLUSION_PROMPT.format(
-                query=query,
-                key_findings="\n".join(s[:250] for s in sections)[:5000],
+                query            = query,
+                sections_preview = "\n\n".join(s[:400] for s in sections[:6]),
             ),
             max_new_tokens=500, role="writer",
         )
+        exec_summary, _ = validate_citations(
+            exec_summary,
+            frozenset(s["url"] for s in all_validated_sources),
+            strict=True,
+        )
+
+        # ── Conclusion ─────────────────────────────────────────────────────
+        logger.info("[Report] Conclusion…")
+        # Budget: 350 tok @ 19.4 tok/s ≈ 18 s (was 400 = 21 s)
+        conclusion = generate_text(
+            _CONCLUSION_PROMPT.format(
+                query        = query,
+                key_findings = "\n".join(s[:200] for s in sections)[:4000],
+            ),
+            max_new_tokens=350, role="writer",
+        )
+        conclusion, _ = validate_citations(
+            conclusion,
+            frozenset(s["url"] for s in all_validated_sources),
+            strict=True,
+        )
+
+        # ── Assemble final report ──────────────────────────────────────────
+        # Deduplicate validated sources by URL
+        seen_urls: set = set()
+        deduped_sources: List[Dict] = []
+        for s in all_validated_sources:
+            url = s.get("url", "")
+            if url and url not in seen_urls and not url.startswith(("rag://", "synthesis://")):
+                seen_urls.add(url)
+                deduped_sources.append(s)
 
         parts = [
             f"# 🔬 Deep Research Report: {query}\n",
@@ -202,10 +270,10 @@ class ReportAgent:
             "\n\n".join(sections),
             self._build_image_gallery(all_images),
             self._build_youtube_section(all_sources),
-            self._build_sources_section(all_sources),
+            sources_section(deduped_sources),
             conclusion.strip(),
         ]
 
         final = "\n\n".join(p for p in parts if p and p.strip())
-        logger.info(f"[Report] Complete — {len(final):,} chars")
+        logger.info(f"[Report] Complete — {len(final):,} chars, {len(deduped_sources)} validated sources")
         return final

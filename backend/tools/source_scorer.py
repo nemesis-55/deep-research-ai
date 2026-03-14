@@ -22,18 +22,9 @@ from backend.config_loader import get
 
 logger = logging.getLogger(__name__)
 
-# High-authority domain bonuses (partial match)
-_HIGH_AUTHORITY = {
-    "nature.com": 30, "science.org": 30, "arxiv.org": 25,
-    "pubmed.ncbi.nlm.nih.gov": 30, "scholar.google": 20,
-    "reuters.com": 25, "bloomberg.com": 25, "ft.com": 25,
-    "economist.com": 25, "wsj.com": 20, "nytimes.com": 20,
-    "bbc.com": 20, "bbc.co.uk": 20, "theguardian.com": 18,
-    "techcrunch.com": 15, "wired.com": 15, "arstechnica.com": 15,
-    "github.com": 18, "stackoverflow.com": 15,
-    "wikipedia.org": 10, "britannica.com": 15,
-    "sec.gov": 30, "congress.gov": 28, "nih.gov": 28, "who.int": 28,
-}
+# High-authority domain bonuses — now delegated to url_filter tiers.
+# Kept as a thin shim so any direct callers of score_source() still work.
+_HIGH_AUTHORITY: dict = {}   # replaced by domain_score_bonus() from url_filter
 
 def _recent_years() -> frozenset:
     """Compute current + previous year at call time (not import time)."""
@@ -49,13 +40,10 @@ def score_source(
     """Return a credibility score 0–100 for a single source."""
     score = 30   # base
 
-    # ── Domain authority ──────────────────────────────────────────────────
+    # ── Domain authority (via url_filter tier system) ─────────────────────
     try:
-        netloc = urlparse(url).netloc.lower().lstrip("www.")
-        for domain, bonus in _HIGH_AUTHORITY.items():
-            if domain in netloc:
-                score += bonus
-                break
+        from backend.tools.url_filter import domain_score_bonus
+        score += domain_score_bonus(url)
     except Exception:
         pass
 

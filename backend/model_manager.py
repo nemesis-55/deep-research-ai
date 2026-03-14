@@ -90,6 +90,12 @@ class ModelHandle:
 _lock:   threading.Lock         = threading.Lock()
 _active: Optional[ModelHandle]  = None
 
+# ── LLM generation semaphore ──────────────────────────────────────────────────
+# MLX/llama_cpp both use the Metal GPU — only one generate() may run at a time.
+# Web search and scraping are I/O-bound and run in separate threads freely.
+# Any call to generate() acquires this before touching the model.
+_LLM_SEMAPHORE: threading.Semaphore = threading.Semaphore(1)
+
 # Queue that generate() pushes (role, think_text) into so the pipeline
 # can drain and emit SSE "think" events without changing the generate() signature.
 import queue as _queue
@@ -353,39 +359,44 @@ def generate(
         logger.info(f"  … [{len(prompt)-PROMPT_LOG_MAX_CHARS} chars truncated]")
     logger.info(_SEP)
 
-    t0 = _time.monotonic()
+    # ── Acquire GPU slot (one LLM call at a time — Metal is not re-entrant) ──
+    logger.debug(f"[{handle.role.upper()}] Waiting for LLM semaphore…")
+    with _LLM_SEMAPHORE:
+        logger.debug(f"[{handle.role.upper()}] LLM semaphore acquired.")
+        t0 = _time.monotonic()
 
-    if handle.runtime == "llama_cpp":
-        logger.info(f"[{handle.role.upper()}] Generating via llama_cpp (max={max_tok}, temp={temp})…")
-        out = handle.model.create_chat_completion(
-            messages    = messages,
-            max_tokens  = max_tok,
-            temperature = temp,
-            top_p       = get("generation.top_p", 0.9),
-        )
-        response = out["choices"][0]["message"]["content"]
-        _out_tokens = out.get("usage", {}).get("completion_tokens", 0)
+        if handle.runtime == "llama_cpp":
+            logger.info(f"[{handle.role.upper()}] Generating via llama_cpp (max={max_tok}, temp={temp})…")
+            out = handle.model.create_chat_completion(
+                messages    = messages,
+                max_tokens  = max_tok,
+                temperature = temp,
+                top_p       = get("generation.top_p", 0.9),
+            )
+            response = out["choices"][0]["message"]["content"]
+            _out_tokens = out.get("usage", {}).get("completion_tokens", 0)
 
-    elif handle.runtime == "mlx":
-        from mlx_lm import generate as mlx_generate              # type: ignore
-        from mlx_lm.sample_utils import make_sampler             # type: ignore
-        logger.info(f"[{handle.role.upper()}] Generating via mlx_lm (max={max_tok}, temp={temp})…")
-        tok       = handle.tokenizer
-        formatted = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        top_p     = get("generation.top_p", 0.9)
-        sampler   = make_sampler(temp=temp, top_p=top_p)
-        response  = mlx_generate(
-            handle.model, handle.tokenizer,
-            prompt     = formatted,
-            max_tokens = max_tok,
-            sampler    = sampler,
-            verbose    = False,
-        )
-        _out_tokens = 0
-    else:
-        raise ValueError(f"Unknown runtime: {handle.runtime}")
+        elif handle.runtime == "mlx":
+            from mlx_lm import generate as mlx_generate              # type: ignore
+            from mlx_lm.sample_utils import make_sampler             # type: ignore
+            logger.info(f"[{handle.role.upper()}] Generating via mlx_lm (max={max_tok}, temp={temp})…")
+            tok       = handle.tokenizer
+            formatted = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            top_p     = get("generation.top_p", 0.9)
+            sampler   = make_sampler(temp=temp, top_p=top_p)
+            response  = mlx_generate(
+                handle.model, handle.tokenizer,
+                prompt     = formatted,
+                max_tokens = max_tok,
+                sampler    = sampler,
+                verbose    = False,
+            )
+            _out_tokens = 0
+        else:
+            raise ValueError(f"Unknown runtime: {handle.runtime}")
 
-    elapsed_s = _time.monotonic() - t0
+        elapsed_s = _time.monotonic() - t0
+    # ── Semaphore released ────────────────────────────────────────────────
 
     raw_response = str(response)
 

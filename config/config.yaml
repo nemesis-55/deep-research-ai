@@ -1,6 +1,14 @@
 # Deep Research AI — Configuration
 # All paths are relative to the project root or absolute local paths.
 # No external drive dependencies — everything lives inside cache/ (git-ignored).
+#
+# ── Benchmark-derived values (2026-03-15, Mac Mini M4 16 GB) ─────────────────
+#   LLM (Qwen2.5-7B 4-bit / MLX):   avg 19.4 tok/s
+#   Best scrape concurrency:         3 workers = 3.10 pages/s
+#   Best search concurrency:         2 workers (3 hits DDG rate-limit)
+#   Evidence builder (20 pages):     ~6.3 s  → max_articles capped at 20
+#   System RAM free at peak:         5.08 GB  (swap 56.7% = 1161 MB used)
+# ─────────────────────────────────────────────────────────────────────────────
 
 huggingface:
   # Leave blank — token loaded from HF_TOKEN env variable or .env file
@@ -30,7 +38,7 @@ models:
     runtime:        mlx
     mlx_repo:       "mlx-community/DeepSeek-R1-Distill-Llama-8B-4bit"
     context_length: 8192
-    max_new_tokens: 1024
+    max_new_tokens: 1024   # planner needs thinking tokens — keep high
     temperature:    0.6
 
   writer:
@@ -38,7 +46,7 @@ models:
     runtime:        mlx
     mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
     context_length: 32768
-    max_new_tokens: 4096
+    max_new_tokens: 1024   # ceiling for explicit calls; agents pass their own value
     temperature:    0.7
 
   chat:
@@ -46,7 +54,7 @@ models:
     runtime:        mlx
     mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
     context_length: 32768
-    max_new_tokens: 4096
+    max_new_tokens: 4096   # chat/technical tier needs full budget
     temperature:    0.7
 
   embedding:
@@ -60,8 +68,8 @@ server:
 
 # ── Search ─────────────────────────────────────────────────────────────────────
 search:
-  max_results:         50    # DDG result pool for deep research (10 / 20 / 50 / 100)
-  max_pages_to_scrape: 10    # pages scraped per deep-research task
+  max_results:         20    # DDG result pool for deep research — 50 was over-fetching
+  max_pages_to_scrape: 8     # pages scraped per deep-research task (benchmark: 3 workers @ 3.1 pages/s)
 
 # ── Vector DB ──────────────────────────────────────────────────────────────────
 vector_db:
@@ -76,33 +84,52 @@ knowledge_graph:
 
 # ── Deep Crawl ─────────────────────────────────────────────────────────────────
 # Phase-0 multi-query fan-out crawl before the main research tasks.
+#
+# Benchmark analysis (2026-03-15):
+#   10 queries × 20 results = 200 candidates (was 500 — DDG rate-limit risk)
+#   Evidence builder: 20 pages = 6.3 s, 30 pages ≈ 9–10 s — capped at 20
+#   Refine threshold raised to 12 (was 8) to match reduced max_articles=20
+#
 # num_queries:        how many diverse queries to generate from the topic
-# results_per_query:  DDG results per query (10 / 20 / 50 / 100)
-# refine_threshold:   if fewer articles stored, run a second crawl pass
+# results_per_query:  DDG results per query
+# max_articles:       max pages scraped in Phase-0 crawl
+# refine_threshold:   if stored articles < this, run a second crawl pass
 deep_crawl:
   enabled:           true
-  num_queries:       10
-  results_per_query: 50    # configurable: 10 | 20 | 50 | 100
-  refine_threshold:  8
+  num_queries:       8       # was 10 — 8 diverse queries is sufficient; saves planner tokens
+  results_per_query: 20      # was 50 — 8×20=160 candidates; avoids DDG rate-limit
+  max_articles:      20      # was 30 — benchmark: 20 pages takes 6.3 s (sweet spot)
+  min_doc_chars:     1000    # skip stub/index pages shorter than this
+  refine_threshold:  12      # was 8 — scaled up to match new max_articles=20
   rag_top_k:         10
 
 # ── Research pipeline ──────────────────────────────────────────────────────────
-# max_results_per_task: DDG results fetched per research sub-task (10 / 20 / 50 / 100)
-# max_pages_per_task:   pages actually scraped & analysed from those results (≤ max_results)
+# Benchmark analysis (2026-03-15):
+#   LLM @ 19.4 tok/s avg:  800 tok ≈ 41 s per section  ✓ acceptable
+#   Scraper: 3 workers = 3.10 pages/s best — max_pages_per_task=8 → ~2.6 s I/O
+#   max_results_per_task: 3 queries × 10 results = 30 candidates → filter to top 8
 research:
-  max_results_per_task: 50   # configurable: 10 | 20 | 50 | 100
-  max_pages_per_task:   10   # configurable: 3 | 5 | 10 | 20
-  research_loops:       3
+  max_results_per_task: 10   # DDG results per sub-task query (3 queries × 10 = 30 candidates)
+  max_pages_per_task:   8    # was 10 — benchmark: diminishing returns beyond 8 usable pages
+  research_loops:       1    # no self-critique loop (adds latency without quality gain)
   max_content_chars:    30000
   chunk_size:           1000
   chunk_overlap:        150
   extract_images:       true
   extract_youtube:      true
-  follow_links:         true
+  follow_links:         false  # breadth over depth per task (Phase-0 already crawled deep)
   follow_links_depth:   1
-  max_follow_links:     3
+  max_follow_links:     2
   sequential_loading:   true
-  source_min_score:     50
+  source_min_score:     40    # was 45 — lowered slightly; domain filter removes junk upstream
+
+# ── Parallelism ────────────────────────────────────────────────────────────────
+# Benchmark results (2026-03-15):
+#   Search:  1w=2.24/s  2w=5.23/s  3w=6.3/s → 3 hits DDG rate-limit; use 2
+#   Scraper: 1w=0.51/s  2w=1.81/s  3w=3.10/s  4w=1.37/s → 3 is optimal
+# LLM (MLX) uses the Metal GPU — always sequential (semaphore-protected).
+parallel_search_workers: 2   # benchmark: 3 workers risks DDG rate-limit jitter
+parallel_scrape_workers: 3   # benchmark: 3 workers = 3.10 pages/s (optimal)
 
 # ── Generation defaults ────────────────────────────────────────────────────────
 generation:
@@ -111,5 +138,5 @@ generation:
 # ── Metrics logging ────────────────────────────────────────────────────────────
 metrics_log:
   interval_s: 30
-  keep_days:   7
-  dir:         "logs/metrics"
+  keep_days:  14     # was 7 — keep 2 weeks of benchmark + runtime data
+  dir:        "logs/metrics"

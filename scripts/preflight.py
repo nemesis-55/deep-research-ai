@@ -177,7 +177,7 @@ def check_constants() -> None:
         from backend import constants as C
         assert C.CHAT_MAX_TOKENS["trivial"]        == 256,  "trivial budget wrong"
         assert C.CHAT_MAX_TOKENS["conversational"] == 1024, "conversational budget wrong"
-        assert C.CHAT_MAX_TOKENS["technical"]      == 4096, "technical budget wrong"
+        assert C.CHAT_MAX_TOKENS["technical"]      == 2048, "technical budget wrong"  # 2048 @ 19.4 tok/s ≈ 105 s
         assert len(C.SEARCH_PHRASES) >= 10,    "SEARCH_PHRASES too short"
         assert len(C.TECHNICAL_KEYWORDS) >= 10, "TECHNICAL_KEYWORDS too short"
         assert C.DDG_BACKOFF_DELAYS == (2, 4, 8), "DDG back-off wrong"

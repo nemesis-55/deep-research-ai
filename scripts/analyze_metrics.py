@@ -6,16 +6,22 @@ Reads the JSONL metrics logs produced by MetricsLogger and prints
 a human-readable summary.
 
 Usage:
-    python scripts/analyze_metrics.py                   # today's log
-    python scripts/analyze_metrics.py --date 2026-03-14 # specific day
-    python scripts/analyze_metrics.py --all             # all log files
-    python scripts/analyze_metrics.py --type inference  # filter type
-    python scripts/analyze_metrics.py --tail 20         # last N records
+    python scripts/analyze_metrics.py                        # today's log
+    python scripts/analyze_metrics.py --date 2026-03-14      # specific day
+    python scripts/analyze_metrics.py --all                  # all log files
+    python scripts/analyze_metrics.py --type inference       # filter type
+    python scripts/analyze_metrics.py --tail 20              # last N records
+    python scripts/analyze_metrics.py --bench-interactions   # benchmark interaction log
+    python scripts/analyze_metrics.py --bench-interactions --date 2026-03-15
 
-Record types in the log:
+Record types in the runtime log:
     hw        — hardware snapshot (every 30 s)
     inference — one entry per model generation
     startup / shutdown — session events
+
+Record types in the benchmark interaction log:
+    session_start / session_end — benchmark session bookends
+    Every other record has: section, op, elapsed_s, ok, detail, mem_rss_mb, mem_free_gb
 """
 from __future__ import annotations
 
@@ -184,6 +190,101 @@ def print_raw(records: List[Dict], n: int) -> None:
             print(f"  {ts}  {typ:<8} {json.dumps({k:v for k,v in r.items() if k not in ('ts','type')})}")
 
 
+# ── Benchmark interaction log printer ─────────────────────────────────────────
+
+def print_bench_interactions(records: List[Dict]) -> None:
+    """Print a detailed table of every timed interaction from a benchmark run."""
+    # Exclude session bookend records from the table
+    interactions = [r for r in records if r.get("section") not in (None,) and
+                    r.get("op") not in ("benchmark_start", "benchmark_end")]
+
+    if not interactions:
+        print("  No interaction records found.")
+        return
+
+    # ── Per-section summary ───────────────────────────────────────────────────
+    sections: Dict[str, list] = {}
+    for r in interactions:
+        sec = r.get("section", "?")
+        sections.setdefault(sec, []).append(r)
+
+    SECTION_ORDER = ["search", "scrape", "embed", "llm", "evidence", "memory"]
+    ordered_sections = [s for s in SECTION_ORDER if s in sections]
+    ordered_sections += [s for s in sections if s not in SECTION_ORDER]
+
+    total_elapsed = sum(r.get("elapsed_s", 0) for r in interactions)
+    ok_count   = sum(1 for r in interactions if r.get("ok", True))
+    fail_count = len(interactions) - ok_count
+
+    print(f"\n  Total interactions : {len(interactions)}")
+    print(f"  Succeeded          : {ok_count}")
+    print(f"  Failed             : {fail_count}")
+    print(f"  Total elapsed      : {total_elapsed:.2f}s")
+
+    for sec in ordered_sections:
+        recs = sections[sec]
+        elapsed_vals = [r["elapsed_s"] for r in recs if r.get("elapsed_s") is not None]
+        ok_recs   = [r for r in recs if r.get("ok", True)]
+        fail_recs = [r for r in recs if not r.get("ok", True)]
+        rss_vals  = [r["mem_rss_mb"] for r in recs if r.get("mem_rss_mb") is not None]
+
+        print(f"\n  ── {sec.upper()} ({'─' * (60 - len(sec))})")
+        print(f"  {'Op':<30} {'Elapsed':>9}  {'OK':<5}  {'RSS MB':>8}  Detail")
+        print(f"  {'─'*30} {'─'*9}  {'─'*5}  {'─'*8}  {'─'*20}")
+
+        for r in recs:
+            op       = r.get("op", "?")
+            elapsed  = r.get("elapsed_s", 0)
+            ok       = r.get("ok", True)
+            rss      = r.get("mem_rss_mb")
+            ts_str   = _ts(r.get("ts", ""))
+            detail   = r.get("detail", {})
+
+            # Build a compact detail string from the most informative fields
+            skip_keys = {"elapsed_s", "ok", "error"}
+            detail_str = "  ".join(
+                f"{k}={v}" for k, v in detail.items()
+                if k not in skip_keys and v not in (None, "", {})
+            )[:60]
+            if not ok:
+                err = detail.get("error", "")
+                detail_str = f"ERROR: {err}"[:60]
+
+            rss_s = f"{rss:.0f}" if rss is not None else "—"
+            ok_s  = "✓" if ok else "✗"
+            print(f"  {op:<30} {elapsed:>8.3f}s  {ok_s:<5}  {rss_s:>8}  {detail_str}")
+
+        # Section stats
+        if elapsed_vals:
+            avg = statistics.mean(elapsed_vals)
+            mx  = max(elapsed_vals)
+            mn  = min(elapsed_vals)
+            tot = sum(elapsed_vals)
+            print(f"\n  → {sec}: {len(recs)} calls | "
+                  f"total={tot:.3f}s  avg={avg:.3f}s  max={mx:.3f}s  min={mn:.3f}s  "
+                  f"errors={len(fail_recs)}")
+            if rss_vals:
+                print(f"     RSS  avg={statistics.mean(rss_vals):.0f} MB  "
+                      f"max={max(rss_vals):.0f} MB  "
+                      f"min={min(rss_vals):.0f} MB")
+
+    # ── Slowest interactions ──────────────────────────────────────────────────
+    slowest = sorted(interactions, key=lambda r: r.get("elapsed_s", 0), reverse=True)[:5]
+    print(f"\n  ── TOP 5 SLOWEST INTERACTIONS {'─'*40}")
+    for i, r in enumerate(slowest, 1):
+        print(f"  {i}. [{r.get('section','?')}] {r.get('op','?'):<30}  "
+              f"{r.get('elapsed_s',0):.3f}s  ok={r.get('ok',True)}")
+
+    # ── Failed interactions ───────────────────────────────────────────────────
+    failed = [r for r in interactions if not r.get("ok", True)]
+    if failed:
+        print(f"\n  ── FAILURES ({len(failed)}) {'─'*50}")
+        for r in failed:
+            err = r.get("detail", {}).get("error", "?")
+            print(f"  [{r.get('section','?')}] {r.get('op','?'):<30}  "
+                  f"{r.get('elapsed_s',0):.3f}s  {err[:60]}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -193,9 +294,44 @@ def main():
     ap.add_argument("--type",  default="",      help="Record type filter: hw|inference|startup|shutdown")
     ap.add_argument("--tail",  type=int, default=0,  help="Print last N raw records")
     ap.add_argument("--raw",   action="store_true",  help="Print raw records (no summary)")
+    ap.add_argument(
+        "--bench-interactions", action="store_true",
+        help="Analyse benchmark interaction log(s) (benchmark_*_interactions.jsonl)",
+    )
     args = ap.parse_args()
 
-    # Collect files
+    # ── Benchmark interaction mode ────────────────────────────────────────────
+    if args.bench_interactions:
+        if args.all:
+            files = sorted(LOG_DIR.glob("benchmark_*_interactions.jsonl"))
+        elif args.date:
+            files = sorted(LOG_DIR.glob(f"benchmark_{args.date}*_interactions.jsonl"))
+        else:
+            today = datetime.now().strftime("%Y-%m-%d")
+            files = sorted(LOG_DIR.glob(f"benchmark_{today}*_interactions.jsonl"))
+
+        if not files:
+            print(f"No benchmark interaction logs found in {LOG_DIR}")
+            print("  Tip: run  python scripts/benchmark.py  first.")
+            return
+
+        all_records: List[Dict] = []
+        for f in files:
+            recs = _load_file(f)
+            all_records.extend(recs)
+
+        print(f"\n{SEP}")
+        print(f"  Deep Research AI — Benchmark Interaction Analysis")
+        print(f"  Log dir  : {LOG_DIR}")
+        print(f"  Files    : {', '.join(f.name for f in files)}")
+        print(f"  Records  : {len(all_records)}")
+        print(SEP)
+
+        print_bench_interactions(all_records)
+        print(f"\n{SEP}\n")
+        return
+
+    # ── Runtime metrics mode (original behaviour) ─────────────────────────────
     if args.all:
         files = sorted(LOG_DIR.glob("metrics_*.jsonl"))
     elif args.date:
@@ -208,35 +344,35 @@ def main():
         print(f"No log files found in {LOG_DIR}")
         return
 
-    all_records: List[Dict] = []
+    all_records_rt: List[Dict] = []
     for f in files:
         recs = _load_file(f, type_filter=args.type)
-        all_records.extend(recs)
+        all_records_rt.extend(recs)
         if not recs:
             print(f"  (empty or missing: {f.name})")
 
     print(f"\n{SEP}")
     print(f"  Deep Research AI — Metrics Analysis")
     print(f"  Log dir  : {LOG_DIR}")
-    print(f"  Files    : {len(files)}  |  Records: {len(all_records)}")
+    print(f"  Files    : {len(files)}  |  Records: {len(all_records_rt)}")
     print(SEP)
 
     if args.tail or args.raw:
-        n = args.tail if args.tail else len(all_records)
+        n = args.tail if args.tail else len(all_records_rt)
         print(f"\n  Last {n} records:\n")
-        print_raw(all_records, n)
+        print_raw(all_records_rt, n)
         return
 
     if not args.type or args.type == "hw":
         print("\n  ── Hardware Snapshots ─────────────────────────────────────────")
-        print_hw_summary(all_records)
+        print_hw_summary(all_records_rt)
 
     if not args.type or args.type == "inference":
         print("\n  ── Inference Performance ──────────────────────────────────────")
-        print_inference_summary(all_records)
+        print_inference_summary(all_records_rt)
 
     # Session events
-    events = [r for r in all_records if r.get("type") in ("startup", "shutdown")]
+    events = [r for r in all_records_rt if r.get("type") in ("startup", "shutdown")]
     if events:
         print("\n  ── Session Events ─────────────────────────────────────────────")
         for e in events:

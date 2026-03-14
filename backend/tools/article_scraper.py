@@ -35,15 +35,14 @@ from urllib.parse import urlparse
 from backend.config_loader import get
 from backend.tools.page_scraper import scrape_page
 from backend.tools.source_scorer import score_source
+from backend.tools.url_filter import is_allowed, get_domain_tier
 from backend.tools.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
-# Patterns that reliably indicate low-value / un-scrapable pages
+# YouTube / binary patterns that can never yield article text
 _SKIP_URL_RE = re.compile(
-    r"(youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com"
-    r"|facebook\.com|tiktok\.com|reddit\.com/r/|pinterest\.com"
-    r"|linkedin\.com/in/|\.pdf$|\.zip$|\.exe$)",
+    r"(youtube\.com|youtu\.be|\.pdf$|\.zip$|\.exe$|\.dmg$|\.apk$)",
     re.IGNORECASE,
 )
 
@@ -54,13 +53,18 @@ def _content_key(text: str) -> str:
     return hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
 
 
-def _url_score(url: str, snippet: str) -> int:
-    """Rough pre-scrape priority score so we scrape the best URLs first."""
-    return score_source(url, snippet, text="")
-
-
 def _is_skippable(url: str) -> bool:
-    return bool(_SKIP_URL_RE.search(url))
+    """Return True for URLs that can never yield useful article text."""
+    if _SKIP_URL_RE.search(url):
+        return True
+    # Also apply the domain credibility filter — reject social/spam domains
+    return not is_allowed(url)
+
+
+def _pre_score(url: str, snippet: str) -> int:
+    """Pre-scrape priority: source scorer + domain tier bonus."""
+    from backend.tools.url_filter import domain_score_bonus
+    return score_source(url, snippet, text="") + domain_score_bonus(url)
 
 
 class ArticleScraper:
@@ -77,7 +81,7 @@ class ArticleScraper:
     def __init__(self, vector_store: VectorStore) -> None:
         self.vector_store   = vector_store
         self.max_articles   = get("deep_crawl.max_articles",    30)
-        self.min_doc_chars  = get("deep_crawl.min_doc_chars",   200)
+        self.min_doc_chars  = get("deep_crawl.min_doc_chars",  1000)   # skip stub pages
 
     def scrape_and_store(
         self,
@@ -116,13 +120,13 @@ class ArticleScraper:
         # ── 2. Priority-rank viable candidates (pre-scrape) ───────────────
         ranked = sorted(
             viable,
-            key=lambda c: _url_score(c["url"], c.get("snippet", "")),
+            key=lambda c: _pre_score(c["url"], c.get("snippet", "")),
             reverse=True,
         )
 
         logger.debug(f"[ArticleScraper] ── Ranked candidates (top 10 by pre-scrape score) ──")
         for idx, c in enumerate(ranked[:10], 1):
-            pre_score = _url_score(c["url"], c.get("snippet", ""))
+            pre_score = _pre_score(c["url"], c.get("snippet", ""))
             logger.debug(f"[ArticleScraper]   #{idx:>2}  score={pre_score:<4}  {c['url']}")
 
         # ── 3. Scrape up to max_articles ──────────────────────────────────

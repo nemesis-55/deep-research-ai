@@ -35,12 +35,15 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 
 # ── Chat: complexity tier token budgets ───────────────────────────────────────
-# M4 16 GB / Qwen2.5-7B: ~13 tok/s  →  4096 ≈ 315s max (stops at EOS sooner)
+# Benchmark (2026-03-15): Qwen2.5-7B MLX 4-bit = 19.4 tok/s avg on M4 16 GB
+#   trivial:        256 tok → ~13 s   ✓
+#   conversational: 1024 tok → ~53 s  ✓
+#   technical:      2048 tok → ~105 s (was 4096 = ~211 s — too slow for chat UX)
 # Model context window: 32 768 tokens — these are output-only budgets.
 CHAT_MAX_TOKENS: dict[str, int] = {
     "trivial":        256,    # greetings — enough for a full paragraph
     "conversational": 1024,   # back-and-forth — up to ~750 words
-    "technical":      4096,   # web search / deep questions — full long-form
+    "technical":      2048,   # web search / deep questions — full long-form, ~105 s max
 }
 
 # ── Chat: system prompts per tier ─────────────────────────────────────────────
@@ -92,13 +95,17 @@ SEARCH_PHRASES: tuple[str, ...] = (
 # ── Adaptive scraping thresholds (CHAT only — deep research uses config.yaml) ─
 # Chat web search is intentionally limited: fast response matters more than depth.
 # Deep research search limits live in config.yaml: research.max_results_per_task
-#   and deep_crawl.results_per_query (both default 50).
-CHAT_SEARCH_MAX_RESULTS      = 10   # DDG result pool for chat  (fixed at 10)
-CHAT_SCRAPE_INITIAL_URLS     = 3    # auto-mode: always scrape at least 3 pages
-CHAT_SCRAPE_MAX_URLS         = 10   # forced-on mode (🌐 toggle): scrape up to 10 pages
-CHAT_SCRAPE_CONFIDENCE_THRESH = 0.65
-CHAT_SCRAPE_TARGET_CHARS     = 15_000
-CHAT_SCRAPE_MIN_USEFUL_CHARS  = 800     # skip stub/index pages below this
+#   and deep_crawl.results_per_query (both tuned by benchmark).
+#
+# Benchmark analysis (2026-03-15):
+#   ~30% of URLs return 404 or stubs < min_useful_chars
+#   Confidence gate at 0.60 is more reliable than 0.65 with noisy real-world pages
+CHAT_SEARCH_MAX_RESULTS       = 10   # DDG result pool for chat  (fixed at 10)
+CHAT_SCRAPE_INITIAL_URLS      = 3    # auto-mode: always scrape at least 3 pages
+CHAT_SCRAPE_MAX_URLS          = 10   # forced-on mode (🌐 toggle): scrape up to 10 pages
+CHAT_SCRAPE_CONFIDENCE_THRESH = 0.60  # was 0.65 — benchmark shows ~30% page fail rate
+CHAT_SCRAPE_TARGET_CHARS      = 15_000
+CHAT_SCRAPE_MIN_USEFUL_CHARS  = 500   # was 800 — some good pages are short (news briefs)
 
 # Max chars injected into LLM prompt — 80k chars ≈ 20k tokens, well within 32k context window
 CHAT_SCRAPE_MAX_CHARS = 80_000
@@ -131,10 +138,14 @@ DDG_BACKOFF_DELAYS: tuple[int, ...] = (2, 4, 8)   # seconds between retries
 DDG_INTER_QUERY_DELAY_S = 1.5                       # delay between fan-out queries
 
 # ── Metrics insights: target latency per tier (seconds) ───────────────────────
+# Derived from benchmark: 19.4 tok/s avg on M4 16 GB
+#   trivial:        256 tok / 19.4 = 13 s  → target 15 s (EOS often hits early)
+#   conversational: 1024 tok / 19.4 = 53 s → target 55 s
+#   technical:      2048 tok / 19.4 = 106 s → target 110 s (was 90 s with wrong budget)
 INSIGHT_TARGET_LATENCY_S: dict[str, int] = {
-    "trivial":        5,
-    "conversational": 20,
-    "technical":      90,   # 4096 tokens ÷ 13 tok/s ≈ 315s max; 90s is realistic avg
+    "trivial":        15,
+    "conversational": 55,
+    "technical":      110,
 }
 
 # Only emit a recommendation when |current - ideal| exceeds this threshold
@@ -192,4 +203,11 @@ SILENT_MODULES: tuple[str, ...] = (
     "filelock", "filelock._unix", "filelock._windows",
     "chromadb", "chromadb.config",
     "sentence_transformers", "sentence_transformers.SentenceTransformer",
+    # Suppress BertModel / SentenceTransformer load-report spam
+    "sentence_transformers.models", "sentence_transformers.models.Transformer",
+    "sentence_transformers.models.Pooling",
+    "transformers.modeling_utils",       # "BertModel LOAD REPORT" source
+    "transformers.configuration_utils",
+    "transformers.tokenization_utils_base",
+    "torch._dynamo",
 )
