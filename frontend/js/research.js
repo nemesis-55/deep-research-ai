@@ -20,17 +20,259 @@ async function startResearch() {
   const query = input.value.trim();
   if (!query || isStreaming) return;
 
+  // Route Normal and Web Search modes to the chat handler instead
+  if (currentMode === 'normal' || currentMode === 'websearch') {
+    return _handleChatMode(query);
+  }
+
+  return _handleDeepResearch(query);
+}
+
+/* ── Chat history state ───────────────────────────────────────────────────── */
+let _chatHistory = [];   // [{role:'user'|'assistant', content:'...'}]
+
+/* ── Null-safe getElementById helpers ──────────────────────────────────────── */
+function _el(id)           { return document.getElementById(id); }
+function _show(id, v='')   { const e = _el(id); if (e) e.style.display = v; }
+function _hide(id)         { const e = _el(id); if (e) e.style.display = 'none'; }
+function _text(id, t)      { const e = _el(id); if (e) e.textContent = t; }
+function _html(id, h)      { const e = _el(id); if (e) e.innerHTML = h; }
+function _width(id, w)     { const e = _el(id); if (e) e.style.width = w; }
+
+/* ── Normal / Web Search mode: unified layout with think/AI-IO/steps ──────── */
+async function _handleChatMode(query) {
+  const input = _el('research-input');
+  if (!input) return;
+  input.value = '';
+  autoResize(input);
+
+  const isFirstTurn = _chatHistory.length === 0;
+
+  /* ── On first turn: reset all panels (subsequent turns append) ────────── */
+  if (isFirstTurn) {
+    _hide('research-placeholder');
+    _hide('report-output');
+    _hide('report-actions');
+    _html('step-list', '');
+    _html('sources-list', '');
+    _text('source-count', '');
+    _width('progress-bar', '0%');
+    resetThinkBlock();
+    resetAioBlock();
+  }
+
+  _text('progress-label', 'Running…');
+
+  /* Show chat history, hide the inner scroll wrapper (placeholder/report) */
+  const chatHist    = _el('chat-history');
+  const innerScroll = _el('research-content-inner');
+  if (chatHist)    chatHist.style.display    = 'flex';
+  if (innerScroll) innerScroll.style.display = 'none';
+
+  /* ── Append user bubble ─────────────────────────────────────────────── */
+  const userMsg = _mkBubble('user', query);
+  chatHist.appendChild(userMsg);
+  userMsg.scrollIntoView({ block: 'end', behavior: 'smooth' });
+
+  /* ── Append empty AI bubble (stream into it) ─────────────────────────── */
+  const aiMsg     = _mkBubble('ai', '');
+  const aiContent = aiMsg.querySelector('.msg-content');
+  aiContent.innerHTML = '<span class="pulse">▋</span>';
+  chatHist.appendChild(aiMsg);
+  aiMsg.scrollIntoView({ block: 'end', behavior: 'smooth' });
+
+  /* ── Left-panel step: new turn ─────────────────────────────────────────── */
+  const modeLabel = currentMode === 'websearch' ? '🌐 Web Search' : '💬 Normal';
+  const turnNum   = Math.floor(_chatHistory.length / 2) + 1;
+  addThinkStep(`─── Turn ${turnNum}: ${query.slice(0, 60)} ───`, 'plan');
+  addStep(`${modeLabel} · Turn ${turnNum}`, 'active');
+  _width('progress-bar', '0%');
+
+  setBusy(true);
+  isStreaming = true;
+
+  let fullText    = '';
+  let webSearched = false;
+  const _startMs  = Date.now();
+
+  try {
+    const body = {
+      message:    query,
+      history:    _chatHistory.map(m => ({ role: m.role, content: m.content })),
+      // Normal mode: force off (never auto-search). Web Search mode: force on.
+      web_search: currentMode === 'websearch' ? true : currentMode === 'normal' ? false : null,
+    };
+
+    const res = await fetch(`${API}/chat`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+
+    const reader = res.body.getReader();
+    const dec    = new TextDecoder();
+    let buf      = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const ev = JSON.parse(line.slice(6));
+          switch (ev.type) {
+
+            case 'web_search':
+              webSearched = true;
+              aiContent.innerHTML = '<span class="chat-searching">🌐 Searching the web…</span>';
+              addThinkStep('Searching the live web…', 'search');
+              addStep('🌐 Searching the web…', 'active');
+              _text('progress-label', 'Searching…');
+              break;
+
+            case 'search_result':
+              /* Individual web result — show in crawl panel + source list */
+              if (ev.url || ev.title) {
+                const srcObj = {
+                  url: ev.url || '',
+                  title: ev.title || ev.url || '',
+                  task: query,
+                  credibility: ev.credibility || 0,
+                };
+                addSourceCard(srcObj);
+                addThinkStep(`Source: ${ev.title || ev.url}`, 'store');
+                const sc = _el('source-count');
+                if (sc) {
+                  const cur = parseInt(sc.textContent.replace(/\D/g,'')) || 0;
+                  sc.textContent = ` (${cur + 1})`;
+                }
+              }
+              break;
+
+            case 'status':
+              /* Backend status messages → think block + step list */
+              addThinkStep(ev.message || ev.content || '', _thinkKind(ev.message || ''));
+              break;
+
+            case 'think':
+              /* AI I/O debug cards */
+              addAioCard(
+                ev.role   || 'chat',
+                ev.prompt || '',
+                ev.output || ev.text || '',
+                ev.think  || '',
+              );
+              break;
+
+            case 'token':
+              fullText += ev.content;
+              aiContent.innerHTML = marked.parse(fullText);
+              aiMsg.scrollIntoView({ block: 'end', behavior: 'smooth' });
+              _text('progress-label', 'Generating…');
+              break;
+
+            case 'done': {
+              const elapsedSec = ((Date.now() - _startMs) / 1000).toFixed(1);
+              addStep('✅ Done', 'done');
+              addThinkStep(`Done · ${elapsedSec}s`, 'done');
+              finaliseThinkBlock(_thinkStepCount, 0, elapsedSec);
+              _width('progress-bar', '100%');
+              _text('progress-label', `Done · ${elapsedSec}s`);
+              _addMsgActions(aiMsg, fullText, webSearched);
+              break;
+            }
+
+            case 'error':
+              aiContent.innerHTML = `<span style="color:var(--red)">Error: ${escHtml(ev.message)}</span>`;
+              addThinkStep(`Error: ${ev.message}`, 'error');
+              addStep(`❌ ${ev.message}`, 'error');
+              break;
+          }
+        } catch { /* skip malformed */ }
+      }
+    }
+  } catch (e) {
+    aiContent.innerHTML = `<span style="color:var(--red)">Connection error: ${escHtml(e.message)}</span>`;
+    addThinkStep(`Connection error: ${e.message}`, 'error');
+    addStep(`❌ Connection error`, 'error');
+  }
+
+  /* Persist to history for next turn */
+  _chatHistory.push({ role: 'user',      content: query    });
+  _chatHistory.push({ role: 'assistant', content: fullText });
+
+  setBusy(false);
+  isStreaming = false;
+}
+
+/** Build a user or AI message bubble element */
+function _mkBubble(role, text) {
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+  const avatar = role === 'user' ? '🧑' : '🤖';
+  const label  = role === 'user' ? 'You'  : 'AI';
+  wrap.innerHTML = `
+    <div class="msg-avatar">${avatar}</div>
+    <div class="msg-body">
+      <div class="msg-role">${label}</div>
+      <div class="msg-content">${role === 'user' ? escHtml(text) : (text ? marked.parse(text) : '')}</div>
+    </div>`;
+  return wrap;
+}
+
+/** Append copy button (and web badge) below an AI bubble */
+function _addMsgActions(msgEl, text, webSearched) {
+  // Remove the pulse cursor if still there
+  const content = msgEl.querySelector('.msg-content');
+  if (content && content.querySelector('.pulse')) {
+    content.innerHTML = marked.parse(text);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+  actions.style.display = 'flex';
+  actions.innerHTML = `
+    <button class="msg-action-btn" onclick="_copyMsg(this)" data-text="${escHtml(text).replace(/"/g,'&quot;')}">📋 Copy</button>
+    ${webSearched ? '<span class="msg-web-badge">🌐 web-grounded</span>' : ''}`;
+  msgEl.querySelector('.msg-body').appendChild(actions);
+}
+
+/** Copy text content of a message */
+function _copyMsg(btn) {
+  const text = btn.dataset.text || '';
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+  });
+}
+
+/* ── Deep Research pipeline ───────────────────────────────────────────────── */
+async function _handleDeepResearch(query) {
+  const input = _el('research-input');
+  if (!input) return;
+  input.value = '';
+  input.style.height = 'auto';
+
   /* ── Reset all UI panels ───────────────────────────────────────────── */
-  document.getElementById('research-placeholder').style.display = 'none';
-  document.getElementById('report-output').style.display        = 'none';
-  document.getElementById('report-output').innerHTML            = '';
-  document.getElementById('report-actions').style.display       = 'none';
-  document.getElementById('step-list').innerHTML                = '';
-  document.getElementById('sources-list').innerHTML             = '';
-  document.getElementById('source-count').textContent          = '';
-  document.getElementById('progress-bar').style.width          = '0%';
-  document.getElementById('progress-label').textContent        = 'Starting…';
-  const metaEl = document.getElementById('report-meta');
+  _hide('research-placeholder');
+  _hide('report-output');
+  _html('report-output', '');
+  _hide('report-actions');
+  _html('step-list', '');
+  _html('sources-list', '');
+  _text('source-count', '');
+  _width('progress-bar', '0%');
+  _text('progress-label', 'Starting…');
+
+  /* Hide chat history — this is deep research mode */
+  _hide('chat-history');
+  _show('research-content-inner', 'flex');
+
+  const metaEl = _el('report-meta');
   if (metaEl) metaEl.textContent = '';
   _lastReportText  = '';
   _researchQuery   = query;
@@ -39,10 +281,11 @@ async function startResearch() {
   resetAioBlock();
 
   /* Keep crawl panel closed until Phase 0 begins */
-  document.getElementById('crawl-panel').classList.remove('open');
-  document.getElementById('crawl-feed').innerHTML = '';
-  document.getElementById('crawl-sites-n').textContent    = '0';
-  document.getElementById('crawl-phase-label').textContent = '';
+  const crawlPanel = _el('crawl-panel');
+  if (crawlPanel) crawlPanel.classList.remove('open');
+  _html('crawl-feed', '');
+  _text('crawl-sites-n', '0');
+  _text('crawl-phase-label', '');
   _crawl.phase0 = false;
   _crawl.phase1 = false;
 
@@ -147,15 +390,14 @@ async function startResearch() {
             _currentTask = ev.current;
             _updateStatusBar(`Task ${ev.current}/${ev.total}: ${(ev.task || '').slice(0, 55)}`);
             const pct = Math.round((ev.current / ev.total) * 80);
-            document.getElementById('progress-bar').style.width  = pct + '%';
-            document.getElementById('progress-label').textContent =
-              `Task ${ev.current} / ${ev.total}`;
+            _width('progress-bar', pct + '%');
+            _text('progress-label', `Task ${ev.current} / ${ev.total}`);
             break;
           }
 
           case 'source':
             sourceCount++;
-            document.getElementById('source-count').textContent = ` (${sourceCount})`;
+            _text('source-count', ` (${sourceCount})`);
             addSourceCard(ev.source);
             addThinkStep(
               `Source: ${ev.source.title || ev.source.url} (cred ${ev.source.credibility})`,
@@ -178,28 +420,29 @@ async function startResearch() {
             break;
 
           case 'report': {
-            document.getElementById('progress-bar').style.width   = '100%';
-            document.getElementById('progress-label').textContent = 'Complete ✅';
+            _width('progress-bar', '100%');
+            _text('progress-label', 'Complete ✅');
             addStep('✅ Report generated!', 'done');
             addThinkStep('Report generated ✅', 'done');
 
             const elapsedSec = ((Date.now() - _startMs) / 1000).toFixed(1);
             finaliseThinkBlock(_thinkStepCount, sourceCount, elapsedSec);
 
-            const out = document.getElementById('report-output');
-            out.style.display = 'block';
-            out.innerHTML     = marked.parse(ev.content);
-            _lastReportText   = ev.content;
+            const out = _el('report-output');
+            if (out) {
+              out.style.display = 'block';
+              out.innerHTML     = marked.parse(ev.content);
+            }
+            _lastReportText = ev.content;
 
-            /* Report metadata */
             if (metaEl) {
               const words = ev.content.trim().split(/\s+/).length;
               metaEl.textContent =
                 `${words.toLocaleString()} words · ${sourceCount} sources · ${elapsedSec}s`;
             }
 
-            document.getElementById('report-actions').style.display = 'flex';
-            scrollBottom('research-content');
+            _show('report-actions', 'flex');
+            scrollBottom('research-content-inner');
             break;
           }
 
@@ -238,7 +481,8 @@ function _thinkKind(msg) {
 
 /* ── Step list ───────────────────────────────────────────────────────────── */
 function addStep(msg, state = 'active') {
-  const list  = document.getElementById('step-list');
+  const list  = _el('step-list');
+  if (!list) return;
   const icons = { active: '⏳', done: '✅', error: '❌' };
 
   /* Mark the previous active step as done */
@@ -259,7 +503,8 @@ function addStep(msg, state = 'active') {
 /* ── Source cards ────────────────────────────────────────────────────────── */
 function addSourceCard(source) {
   if (!source.url) return;
-  const list  = document.getElementById('sources-list');
+  const list  = _el('sources-list');
+  if (!list) return;
   const cred  = source.credibility || 0;
   const color = cred >= 70 ? 'var(--green)' : cred >= 45 ? 'var(--yellow)' : 'var(--red)';
 
@@ -277,3 +522,8 @@ function addSourceCard(source) {
     </div>`;
   list.appendChild(card);
 }
+
+/* ── Bootstrap: called here (last script) so every helper is available ──── */
+// switchMode() needs: resetThinkBlock/resetAioBlock (report.js),
+// addStep/addSourceCard (research.js), escHtml (utils.js) — all loaded above.
+switchMode('normal');

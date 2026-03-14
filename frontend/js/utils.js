@@ -18,11 +18,10 @@ function autoResize(el) {
   el.style.height = Math.min(el.scrollHeight, 400) + 'px';
 }
 
-function fillPrompt(text) {
-  document.getElementById('prompt-input').value = text;
-  document.getElementById('chat-empty').style.display = 'none';
-}
-
 function fillResearchPrompt(text) {
-  document.getElementById('research-input').value = text;
+  const ta = document.getElementById('research-input');
+  if (!ta) return;
+  ta.value = text;
+  autoResize(ta);
+  ta.focus();
 }

@@ -20,7 +20,7 @@ function resetThinkBlock() {
 function _setThinkSummary(text, spinning) {
   const el   = document.getElementById('think-summary-text');
   const sp   = document.getElementById('think-spinner');
-  const hint = document.querySelector('.think-toggle-hint');
+  const hint = document.querySelector('.think-block .expand-hint');
   if (el) el.textContent = text;
   if (sp) sp.style.display = spinning ? 'inline-block' : 'none';
   if (hint) {
@@ -62,7 +62,7 @@ function finaliseThinkBlock(stepCount, sourceCount, elapsedSec) {
   );
   const block = document.getElementById('think-block');
   if (block) block.open = false;          // auto-collapse so report is prominent
-  const hint = document.querySelector('.think-toggle-hint');
+  const hint = document.querySelector('.think-block .expand-hint');
   if (hint) hint.textContent = 'click to expand';
 }
 
@@ -137,7 +137,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const block = document.getElementById('think-block');
   if (!block) return;
   block.addEventListener('toggle', () => {
-    const hint = document.querySelector('.think-toggle-hint');
+    const hint = document.querySelector('.think-block .expand-hint');
     if (hint) hint.textContent = block.open ? 'click to collapse' : 'click to expand';
   });
 });

@@ -24,7 +24,7 @@ function _gauge(barId, labelId, pct, warnAt = 70, critAt = 90) {
   if (!bar || !label) return;
   const p = pct ?? 0;
   bar.style.width = Math.min(p, 100) + '%';
-  bar.className   = 'metrics-bar-fill';
+  bar.className   = 'mbar-fill';
   if      (p >= critAt) bar.classList.add('crit');
   else if (p >= warnAt) bar.classList.add('warn');
   label.textContent = _fmtPct(pct);

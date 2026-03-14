@@ -53,7 +53,7 @@ function _crawlPhase1End() {
 function toggleCrawlPanel() {
   _crawl.collapsed = !_crawl.collapsed;
   const feed = document.getElementById('crawl-feed');
-  const bar  = document.querySelector('.crawl-phase-bar');
+  const bar  = document.querySelector('.crawl-pbar');
   const btn  = document.getElementById('crawl-collapse-btn');
   if (_crawl.collapsed) {
     feed.style.display = 'none';
