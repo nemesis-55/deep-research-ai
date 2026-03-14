@@ -8,7 +8,7 @@ Checks (in order):
   1.  Package imports        — every required pip package importable
   2.  Config loading         — config.yaml parses, required keys present
   3.  Constants              — backend/constants.py importable, key values sane
-  4.  External drive         — T7 Shield mounted (warns, not fatal)
+  4.  Local cache folder     — cache/hub exists and is readable
   5.  Model files            — GGUF / MLX cache exists on disk
   6.  Web search             — DuckDuckGo returns ≥ 1 result (live network)
   7.  Web scraper            — trafilatura / BS4 can scrape a known stable URL
@@ -192,15 +192,20 @@ def check_constants() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_drive() -> None:
-    _print_header("4 · External drive (T7 Shield)")
-    from backend.constants import EXT_DRIVE
+    _print_header("4 · Local model cache (cache/hub)")
+    from pathlib import Path
+    _root = Path(__file__).parent.parent
+    cache_hub = _root / "cache" / "hub"
 
     def _check():
-        if not EXT_DRIVE.exists():
-            raise Warning(f"T7 Shield not mounted at {EXT_DRIVE} — using local SSD fallback")
-        return str(EXT_DRIVE)
+        if not cache_hub.exists():
+            raise Warning(
+                f"cache/hub not found at {cache_hub} — "
+                "run Step 2 (prefetch) to download models"
+            )
+        return str(cache_hub)
 
-    _run("T7 Shield mounted", _check, warn_only=True)
+    _run("cache/hub exists", _check, warn_only=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -211,8 +216,11 @@ def check_model_files() -> None:
     _print_header("5 · Model files on disk")
     from backend.config_loader import get
 
-    # Check GGUF files
+    # Check GGUF files — only relevant for roles using llama_cpp runtime
     for role in ("planner", "writer", "chat"):
+        runtime = get(f"models.{role}.runtime", "mlx")
+        if runtime != "llama_cpp":
+            continue   # MLX roles don't need a GGUF on disk
         def _check_gguf(r=role):
             p = Path(get(f"models.{r}.gguf_path", ""))
             if not p.exists():
@@ -220,9 +228,9 @@ def check_model_files() -> None:
             return f"{p.stat().st_size / 1e9:.1f} GB"
         _run(f"{role} GGUF on disk", _check_gguf, warn_only=True)
 
-    # Check MLX cache
-    hf_cache = Path(os.environ.get("HF_HUB_CACHE",
-                    str(Path.home() / ".cache" / "huggingface" / "hub")))
+    # Check MLX cache — read cache dir from config.yaml (same as model_manager)
+    _raw_hf = get("storage.hf_cache", str(Path.home() / ".cache" / "huggingface" / "hub"))
+    hf_cache = Path(_raw_hf).expanduser()
     for role in ("planner", "writer", "chat"):
         def _check_mlx(r=role):
             repo = get(f"models.{r}.mlx_repo", "")

@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 # ── Config ────────────────────────────────────────────────────────────────────
 HF_TOKEN  = os.environ.get("HF_TOKEN", "")   # set in .env — never hardcode
 MODEL_ID  = "openbmb/MiniCPM-V-2_6"
-CACHE_DIR = "/Volumes/T7 Shield/DeepResearchAI/model_cache"
+CACHE_DIR = str(Path(__file__).parent.parent / "cache" / "hub")
 PROMPT    = "What is 2 + 2? Answer in one sentence. Reply in English only."
 
 # ── Step 0: memory snapshot before anything ───────────────────────────────────

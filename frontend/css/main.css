@@ -376,7 +376,7 @@ html, body {
 textarea {
   flex: 1; background: transparent; border: none; outline: none;
   color: var(--text); font-size: 14px; font-family: var(--font);
-  resize: none; max-height: 160px; min-height: 22px; line-height: 1.55;
+  resize: none; max-height: 400px; min-height: 22px; line-height: 1.55;
 }
 textarea::placeholder { color: var(--muted); }
 
@@ -389,6 +389,56 @@ textarea::placeholder { color: var(--muted); }
 .send-btn:hover  { background: var(--accent-h); transform: scale(1.05); }
 .send-btn:active { transform: scale(.97); }
 .send-btn:disabled { opacity: .4; cursor: not-allowed; transform: none; }
+
+/* Web-search toggle — chat input bar */
+.web-search-toggle {
+  height: 36px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--muted); cursor: pointer; flex-shrink: 0;
+  font-size: 16px; display: flex; align-items: center; justify-content: center;
+  transition: all .15s; align-self: flex-end; line-height: 1;
+}
+.web-search-toggle:hover { border-color: var(--accent); color: var(--text); }
+.web-search-toggle.active {
+  background: var(--accent-dim); border-color: var(--accent);
+  color: var(--accent); box-shadow: 0 0 0 2px rgba(59,130,246,.2);
+}
+
+/* Show-Now button — inside research status bar */
+.show-now-btn {
+  height: 30px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--yellow);
+  background: rgba(245,158,11,.15); color: var(--yellow); cursor: pointer; flex-shrink: 0;
+  font-size: 12px; font-weight: 700; font-family: var(--font);
+  display: flex; align-items: center; gap: 4px;
+  transition: all .15s; white-space: nowrap;
+}
+.show-now-btn:hover {
+  background: rgba(245,158,11,.3); box-shadow: 0 0 0 2px rgba(245,158,11,.25);
+}
+.show-now-btn:active { transform: scale(.97); }
+.show-now-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Research live status bar */
+.research-status-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  background: rgba(59,130,246,.07); border: 1px solid rgba(59,130,246,.2);
+  border-radius: 10px; padding: 8px 14px; margin-bottom: 8px; gap: 12px;
+  animation: fadeUp .2s ease;
+}
+.rsb-left  { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.rsb-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.rsb-spinner {
+  width: 10px; height: 10px; flex-shrink: 0;
+  border: 2px solid rgba(96,165,250,.25); border-top-color: #60a5fa;
+  border-radius: 50%; animation: spin .8s linear infinite;
+}
+.rsb-task {
+  font-size: 12px; color: #93c5fd; font-weight: 500;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.rsb-stat  { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.rsb-icon  { font-size: 13px; }
+.rsb-stat strong, #rsb-q-val, #rsb-t-val { color: var(--text); font-weight: 700; }
+.rsb-divider { color: var(--border); font-size: 14px; }
 
 .input-hint {
   font-size: 11px; color: var(--muted); text-align: center;

@@ -31,6 +31,19 @@ function copyCodeBlock(btn) {
 }
 
 let chatHistory = [];
+let _webSearchForced = false;   // null=auto, true=force on
+
+function toggleWebSearch() {
+  _webSearchForced = !_webSearchForced;
+  const btn = document.getElementById('web-search-toggle');
+  if (_webSearchForced) {
+    btn.classList.add('active');
+    btn.title = 'Web search ON (10 pages) — click to toggle off';
+  } else {
+    btn.classList.remove('active');
+    btn.title = 'Toggle web search (10 pages)';
+  }
+}
 
 function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
@@ -57,10 +70,14 @@ async function handleSend() {
   let webSearched = false;
 
   try {
+    const body = { message: text, history: chatHistory.slice(-12) };
+    // Pass explicit override only when user has toggled it on; let backend auto-detect otherwise
+    if (_webSearchForced) body.web_search = true;
+
     const res = await fetch(`${API}/chat`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ message: text, history: chatHistory.slice(-12) }),
+      body:    JSON.stringify(body),
     });
 
     const reader = res.body.getReader();
@@ -81,7 +98,7 @@ async function handleSend() {
             case 'web_search':
               webSearched = true;
               contentEl.innerHTML =
-                `<span class="chat-searching">🌐 Searching the web…</span>`;
+                `<span class="chat-searching">🌐 Searching the web${_webSearchForced ? ' (up to 10 pages)' : ''}…</span>`;
               break;
             case 'token':
               fullText += ev.content;
@@ -90,7 +107,9 @@ async function handleSend() {
               break;
             case 'done':
               if (webSearched && metaEl) {
-                metaEl.innerHTML = '🌐 Answer grounded with live web search';
+                metaEl.innerHTML = _webSearchForced
+                  ? '🌐 Answer grounded with live web search (up to 10 pages scraped)'
+                  : '🌐 Answer grounded with live web search';
                 metaEl.style.display = 'block';
               }
               // Show copy + PDF buttons after response completes

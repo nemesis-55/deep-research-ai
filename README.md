@@ -18,7 +18,7 @@ No cloud. No data leaving your machine. Everything runs on-device.
 | **Web scraping** | trafilatura + BeautifulSoup4 |
 | **Backend** | FastAPI + SSE streaming |
 | **Frontend** | Vanilla HTML/CSS/JS (no build step) |
-| **Storage** | Samsung T7 Shield SSD (models + uploads) |
+| **Storage** | Local `cache/` folder inside project (git-ignored) |
 
 ---
 
@@ -62,12 +62,7 @@ cp .env.example .env
 > Get a free token at https://huggingface.co/settings/tokens  
 > Required to download gated models (DeepSeek-R1, Qwen2.5).
 
-### 4. External drive (optional)
-
-Mount a Samsung T7 Shield (or any drive) at `/Volumes/T7 Shield/DeepResearchAI`.  
-If not present, the server falls back to local SSD automatically.
-
-### 5. Start
+### 4. Start
 
 ```zsh
 python scripts/start.py

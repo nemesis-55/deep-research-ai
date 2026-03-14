@@ -46,8 +46,16 @@ function setBusy(v) {
 }
 
 function setResearchBusy(v) {
-  const btn = document.getElementById('research-btn');
-  if (!btn) return;
-  btn.disabled  = v;
-  btn.innerHTML = v ? '<div class="spinner"></div>' : _SRCH_SVG;
+  const btn    = document.getElementById('research-btn');
+  const bar    = document.getElementById('research-status-bar');
+  const nowBtn = document.getElementById('show-now-btn');
+  if (btn) {
+    btn.disabled  = v;
+    btn.innerHTML = v ? '<div class="spinner"></div>' : _SRCH_SVG;
+  }
+  if (bar) bar.style.display = v ? 'flex' : 'none';
+  if (nowBtn) {
+    nowBtn.disabled    = false;
+    nowBtn.textContent = '⚡ Report Now';
+  }
 }

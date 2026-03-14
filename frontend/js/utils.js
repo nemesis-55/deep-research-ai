@@ -15,7 +15,7 @@ function scrollBottom(id) {
 
 function autoResize(el) {
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+  el.style.height = Math.min(el.scrollHeight, 400) + 'px';
 }
 
 function fillPrompt(text) {

@@ -21,7 +21,7 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 MODEL_ID  = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-CACHE_DIR = "/Volumes/T7 Shield/DeepResearchAI/model_cache"
+CACHE_DIR = str(Path(__file__).parent.parent / "cache" / "hub")
 PROMPT    = "What is 2 + 2? Answer in one sentence in English."
 
 # ── Step 0: RAM snapshot ──────────────────────────────────────────────────────

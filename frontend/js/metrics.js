@@ -84,14 +84,6 @@ function _renderMetrics(d) {
   _stat('m-disk-free',  _fmtBytes(disk.free_bytes));
   _stat('m-disk-total', _fmtBytes(disk.total_bytes));
 
-  const ext = d.ext_disk;
-  const extRow = document.getElementById('m-ext-disk-row');
-  if (extRow) extRow.style.display = ext ? '' : 'none';
-  if (ext) {
-    _gauge('m-ext-disk-bar', 'm-ext-disk-pct', ext.pct, 80, 92);
-    _stat('m-ext-disk-free', _fmtBytes(ext.free_bytes));
-  }
-
   /* ── Process (this server) ───────────────────────────────── */
   const proc = d.process || {};
   _stat('m-proc-rss',     _fmtBytes(proc.rss_bytes));

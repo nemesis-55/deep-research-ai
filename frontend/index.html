@@ -121,17 +121,6 @@
         </div>
       </div>
 
-      <div class="metric-block" id="m-ext-disk-row" style="display:none">
-        <div class="metric-header">
-          <span class="metric-label">🔴 T7 Shield</span>
-          <span class="metric-pct" id="m-ext-disk-pct">—</span>
-        </div>
-        <div class="metrics-bar-wrap"><div class="metrics-bar-fill" id="m-ext-disk-bar"></div></div>
-        <div class="metric-stats">
-          <div class="metric-row"><span>Free</span><span id="m-ext-disk-free">—</span></div>
-        </div>
-      </div>
-
       <hr class="metric-divider" />
 
       <div class="metric-block">
@@ -196,13 +185,17 @@
         <div class="input-wrap">
           <textarea id="prompt-input" rows="1" placeholder="Message Deep Research AI…"
                     onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+          <button class="web-search-toggle" id="web-search-toggle"
+                  onclick="toggleWebSearch()" title="Toggle web search (10 pages)">
+            🌐
+          </button>
           <button class="send-btn" id="send-btn" onclick="handleSend()" title="Send (Enter)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
             </svg>
           </button>
         </div>
-        <div class="input-hint">Enter to send · Shift+Enter for new line</div>
+        <div class="input-hint">Enter to send · Shift+Enter for new line · 🌐 toggle web search</div>
       </div>
     </div>
 
@@ -304,6 +297,26 @@
       </div><!-- .research-layout -->
 
       <div class="input-bar">
+        <!-- ── Live research status bar (visible only while running) ── -->
+        <div class="research-status-bar" id="research-status-bar" style="display:none">
+          <div class="rsb-left">
+            <span class="rsb-spinner"></span>
+            <span class="rsb-task" id="rsb-task">Researching…</span>
+          </div>
+          <div class="rsb-right">
+            <span class="rsb-stat" id="rsb-queries" title="AI queries remaining">
+              <span class="rsb-icon">🤖</span><span id="rsb-q-val">—</span> queries left
+            </span>
+            <span class="rsb-divider">·</span>
+            <span class="rsb-stat" id="rsb-time" title="Estimated time remaining">
+              <span class="rsb-icon">⏱</span><span id="rsb-t-val">—</span> remaining
+            </span>
+            <button class="show-now-btn" id="show-now-btn" onclick="showResultNow()"
+                    title="Stop after current task and generate report now">
+              ⚡ Report Now
+            </button>
+          </div>
+        </div>
         <div class="input-wrap">
           <textarea id="research-input" rows="1" placeholder="Enter research query…"
                     onkeydown="handleResearchKey(event)" oninput="autoResize(this)"></textarea>
@@ -313,7 +326,7 @@
             </svg>
           </button>
         </div>
-        <div class="input-hint">Enter to start research · Shift+Enter for new line</div>
+        <div class="input-hint">Enter to start research · Shift+Enter for new line · ⚡ Report Now to finish early</div>
       </div>
     </div><!-- #view-research -->
 

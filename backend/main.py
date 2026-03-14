@@ -49,13 +49,11 @@ from backend.constants import (
     CHAT_SCRAPE_CONFIDENCE_THRESH,
     CHAT_SCRAPE_TARGET_CHARS,
     DEBUG_MODULES,
-    EXT_DRIVE,
-    EXT_UPLOAD_DIR,
     FRONTEND_DIR as _FRONTEND_DIR,
     INSIGHT_MIN_DELTA_TOKENS,
     INSIGHT_MIN_SAMPLES,
     INSIGHT_TARGET_LATENCY_S,
-    LOCAL_UPLOAD_DIR,
+    UPLOAD_DIR as LOCAL_UPLOAD_DIR,
     LOG_DIR as _LOG_DIR_CONST,
     METRICS_DIR,
     REQUIRED_PACKAGES,
@@ -86,15 +84,8 @@ for _noisy in SILENT_MODULES:
 # ── Storage paths ─────────────────────────────────────────────────────────────
 FRONTEND_DIR = _FRONTEND_DIR
 
-if EXT_DRIVE.exists():
-    UPLOAD_DIR = EXT_UPLOAD_DIR
-    logger.info(f"📦  Storage → external drive: {EXT_DRIVE}")
-else:
-    UPLOAD_DIR = LOCAL_UPLOAD_DIR
-    logger.warning(
-        "⚠️  T7 Shield NOT mounted — uploads falling back to LOCAL SSD. "
-        "Mount the drive and restart to use external storage."
-    )
+UPLOAD_DIR = LOCAL_UPLOAD_DIR
+logger.info(f"📦  Upload storage → {UPLOAD_DIR}")
 
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -210,11 +201,13 @@ app.mount("/js",  StaticFiles(directory=str(FRONTEND_DIR / "js")),  name="js")
 class ChatRequest(BaseModel):
     message: str
     history: List[Dict] = []
+    web_search: Optional[bool] = None   # None = auto-detect, True = force on, False = force off
 
 
 class ResearchRequest(BaseModel):
     query: str
     file_paths: List[str] = []
+    show_now: bool = False              # True = skip remaining tasks, generate report now
 
 
 # ── SSE helper ────────────────────────────────────────────────────────────────
@@ -255,7 +248,7 @@ async def health():
     from backend.model_loader import get_loaded_model_name, get_loaded_role, get_device
     from backend.config_loader import get as cfg_get
 
-    models_dir  = Path(cfg_get("storage.models", "/Volumes/T7 Shield/DeepResearchAI/models"))
+    models_dir  = Path(cfg_get("storage.models", str(Path(__file__).parent.parent / "cache" / "models")))
     hf_token    = cfg_get("huggingface.token", "") or os.environ.get("HF_TOKEN", "")
     role        = get_loaded_role()
     model_ready = role is not None or bool(os.environ.get("MODEL_PRELOADED"))
@@ -606,16 +599,12 @@ def _score_confidence(scraped_texts: list[str], result_snippets: list[str]) -> f
     return score
 
 
-def _chat_web_search(query: str) -> str:
+def _chat_web_search(query: str, max_pages: int = CHAT_SCRAPE_MAX_URLS) -> str:
     """
-    Adaptive scraping: always start with CHAT_SCRAPE_INITIAL_URLS pages.
-    If the confidence score is below CHAT_SCRAPE_CONFIDENCE_THRESH, keep
-    fetching more URLs (up to CHAT_SCRAPE_MAX_URLS) until confidence is met
-    or we run out of results.
-
-    This means:
-      - Simple, well-covered queries  → 3 pages scraped (fast, ~2-3 s)
-      - Ambiguous / niche queries     → up to 10 pages scraped (thorough, ~8-12 s)
+    Scrape up to `max_pages` pages for the query.
+    Confidence check still used for the auto-detect path; when called with
+    max_pages == CHAT_SCRAPE_MAX_URLS (default) it always scrapes all pages.
+    Full text of each page is included — no per-page truncation.
     """
     from backend.tools.web_search import search_web
     from backend.tools.page_scraper import scrape_page
@@ -638,18 +627,16 @@ def _chat_web_search(query: str) -> str:
     snippets       = [r.get("snippet", "") for r in results]
     scraped_texts: list[str] = []
     scraped_count  = 0
-    per_page_limit = CHAT_SCRAPE_MAX_CHARS // CHAT_SCRAPE_INITIAL_URLS  # initial budget per page
 
     for idx, r in enumerate(results):
         url = r.get("url", "")
         if not url:
             continue
 
-        # ── Scrape this page ──────────────────────────────────────────────────
         try:
             page = scrape_page(url)
             text = (page.get("text") or "").strip()
-            if len(text) > CHAT_SCRAPE_MIN_USEFUL_CHARS:   # skip stubs/index pages
+            if len(text) > CHAT_SCRAPE_MIN_USEFUL_CHARS:
                 scraped_texts.append(text)
                 scraped_count += 1
                 logger.debug(f"[Chat] Scraped {len(text):,} chars from {url[:60]}")
@@ -658,8 +645,8 @@ def _chat_web_search(query: str) -> str:
         except Exception as e:
             logger.debug(f"[Chat] Page scrape failed for {url}: {e}")
 
-        # ── After initial pass: score confidence ──────────────────────────────
-        if scraped_count == CHAT_SCRAPE_INITIAL_URLS:
+        # ── After initial pass: score confidence (auto mode only) ─────────
+        if scraped_count == CHAT_SCRAPE_INITIAL_URLS and max_pages == CHAT_SCRAPE_INITIAL_URLS:
             confidence = _score_confidence(scraped_texts, snippets)
             logger.info(
                 f"[Chat] 📊 Confidence after {scraped_count} pages: {confidence:.2f} "
@@ -669,22 +656,16 @@ def _chat_web_search(query: str) -> str:
                 logger.info(f"[Chat] ✅ Confidence met — stopping at {scraped_count} pages")
                 break
 
-        # ── Hard cap ──────────────────────────────────────────────────────────
-        if scraped_count >= CHAT_SCRAPE_MAX_URLS:
-            logger.info(f"[Chat] 🔢 Reached max scrape limit ({CHAT_SCRAPE_MAX_URLS} pages)")
+        if scraped_count >= max_pages:
+            logger.info(f"[Chat] 🔢 Reached max scrape limit ({max_pages} pages)")
             break
 
-    # ── Build article section with proportional budget ────────────────────────
-    # Give each page a share proportional to its length so long, rich articles
-    # get more of the budget and short stub pages don't waste their slot.
+    # ── Build article section — full text, no per-page truncation ─────────
     if scraped_texts:
-        total_len = sum(len(t) for t in scraped_texts) or 1
         for i, (r, text) in enumerate(zip(results, scraped_texts)):
-            share      = len(text) / total_len
-            page_chars = max(500, int(CHAT_SCRAPE_MAX_CHARS * share))
             lines.append(f"### Article {i+1}: {r.get('title', '')}")
             lines.append(f"Source: {r.get('url', '')}")
-            lines.append(text[:page_chars])
+            lines.append(text)
             lines.append("")
 
     final_confidence = _score_confidence(scraped_texts, snippets) if scraped_texts else 0.0
@@ -741,15 +722,23 @@ async def chat(req: ChatRequest):
     logger.debug(f"[Chat] complexity={complexity} max_tokens={max_tokens} msg={req.message[:60]!r}")
 
     # ── Live web search (non-blocking, runs before LLM) ───────────────────────
+    # req.web_search: None=auto-detect, True=force on, False=force off
     web_context  = ""
     web_searched = False
-    if _needs_web_search(req.message):
+    do_search = (
+        req.web_search                          # forced ON by user toggle
+        if req.web_search is not None
+        else _needs_web_search(req.message)     # auto-detect
+    )
+    if do_search:
         search_query = _build_search_query(req.message, req.history)
         logger.info(f"[Chat] 🌐 Web search triggered for: {search_query[:70]!r}")
         try:
             loop = asyncio.get_event_loop()
+            # Force-on toggle → always scrape all 10 pages; auto → adaptive
+            max_pages = CHAT_SCRAPE_MAX_URLS if req.web_search is True else CHAT_SCRAPE_INITIAL_URLS
             web_context = await loop.run_in_executor(
-                None, lambda: _chat_web_search(search_query)
+                None, lambda: _chat_web_search(search_query, max_pages=max_pages)
             )
             web_searched = bool(web_context)
             if web_searched:
@@ -758,9 +747,32 @@ async def chat(req: ChatRequest):
             logger.warning(f"[Chat] Web search failed: {e}")
 
     def _build_prompt(history: List[Dict], message: str, web_ctx: str) -> str:
+        # ── Budget-aware web context trim ─────────────────────────────────────
+        # Context window = config context_length (tokens).  Reserve max_tokens
+        # for output + ~256 tokens for system prompt + history overhead.
+        # 1 token ≈ 4 chars (conservative estimate for English prose).
+        ctx_tokens   = get("models.chat.context_length", 32768)
+        output_tokens = max_tokens                    # e.g. 4096 for technical
+        overhead_tokens = 512                         # system prompt + history
+        web_budget_tokens = ctx_tokens - output_tokens - overhead_tokens
+        web_budget_chars  = max(4_000, web_budget_tokens * 4)  # floor: 4k chars
+
+        trimmed_ctx = web_ctx
+        if web_ctx and len(web_ctx) > web_budget_chars:
+            trimmed_ctx = web_ctx[:web_budget_chars]
+            # Trim to the last complete line so we don't cut mid-sentence
+            last_nl = trimmed_ctx.rfind("\n")
+            if last_nl > web_budget_chars // 2:
+                trimmed_ctx = trimmed_ctx[:last_nl]
+            trimmed_ctx += "\n[… web context trimmed to fit context window …]"
+            logger.debug(
+                f"[Chat] web_ctx trimmed {len(web_ctx):,} → {len(trimmed_ctx):,} chars "
+                f"(budget={web_budget_chars:,} chars / {web_budget_tokens:,} tokens)"
+            )
+
         lines = [f"{system_prompt}\n"]
-        if web_ctx:
-            lines.append(web_ctx)
+        if trimmed_ctx:
+            lines.append(trimmed_ctx)
             lines.append("\n---\n")
         for turn in history[-12:]:   # 12 turns ≈ 6 back-and-forth exchanges
             label = "User" if turn.get("role") == "user" else "Assistant"
@@ -808,6 +820,7 @@ async def research(req: ResearchRequest):
             async for event in pipeline.run(
                 query=req.query,
                 uploaded_files=req.file_paths or [],
+                show_now=req.show_now,
             ):
                 yield _sse(event)
         except Exception as e:
@@ -815,6 +828,14 @@ async def research(req: ResearchRequest):
             yield _sse({"type": "error", "message": str(e)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/research/show-now")
+async def research_show_now():
+    """Signal the running research pipeline to skip remaining tasks and report now."""
+    pipeline = _get_pipeline()
+    pipeline.request_show_now()
+    return {"ok": True}
 
 
 # ── Entry point (prefer scripts/start.py) ─────────────────────────────────────

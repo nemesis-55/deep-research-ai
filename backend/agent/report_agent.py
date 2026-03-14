@@ -35,28 +35,6 @@ Write a thorough section (500-800 words) with:
 
 Do NOT write an intro or conclusion. Use ONLY the evidence provided."""
 
-_SECTION_WITH_RAG_PROMPT = """\
-You are a world-class research analyst writing one section of a deep-dive report.
-
-Report Topic: {query}
-This Section: {section_topic}
-
-Background Context (from deep web crawl — use as supporting evidence):
-{rag_context}
-
-Primary Research Evidence:
-{evidence}
-
-Write a thorough section (500-800 words) with:
-- ## heading matching the section topic
-- ### sub-headings where appropriate
-- Specific facts, numbers, quotes from both the background context and primary evidence
-- Inline citations as [Title](URL)
-- Bullet lists for key data points
-
-Prioritise the Primary Research Evidence for structure; use Background Context to add
-depth, statistics, and corroborating details. Use ONLY provided evidence."""
-
 _EXEC_SUMMARY_PROMPT = """\
 You are writing the Executive Summary of a major research report.
 
@@ -175,42 +153,22 @@ class ReportAgent:
 
     # ── Director method ───────────────────────────────────────────────────────
 
-    def generate_report(
-        self,
-        query:       str,
-        all_sources: List[Dict],
-        rag_context: str = "",
-    ) -> str:
+    def generate_report(self, query: str, all_sources: List[Dict]) -> str:
         logger.info(f"[Report] Generating for: {query} ({len(all_sources)} sources)")
 
         grouped    = self._group_by_task(all_sources)
         all_images = self._collect_images(all_sources)
         sections:  List[str] = []
 
-        # Trim RAG context to fit comfortably in the prompt without crowding evidence
-        rag_snippet = rag_context[:3000] if rag_context else ""
-
         for task, task_sources in grouped.items():
             logger.info(f"[Report] Section: {task[:70]}")
             evidence = self._build_evidence(task_sources)
             if not evidence.strip():
                 continue
-
-            if rag_snippet:
-                prompt = _SECTION_WITH_RAG_PROMPT.format(
-                    query        = query,
-                    section_topic= task,
-                    rag_context  = rag_snippet,
-                    evidence     = evidence,
-                )
-            else:
-                prompt = _SECTION_PROMPT.format(
-                    query        = query,
-                    section_topic= task,
-                    evidence     = evidence,
-                )
-
-            section = generate_text(prompt, max_new_tokens=1200, role="writer")
+            section = generate_text(
+                _SECTION_PROMPT.format(query=query, section_topic=task, evidence=evidence),
+                max_new_tokens=1200, role="writer",
+            )
             if section.strip():
                 sections.append(section.strip())
 

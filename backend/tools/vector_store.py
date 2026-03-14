@@ -68,22 +68,9 @@ class VectorStore:
 
     def __init__(self) -> None:
         # ── Vector DB path ────────────────────────────────────────────────────
-        _EXT_DRIVE = Path("/Volumes/T7 Shield/DeepResearchAI")
+        _project_root = Path(__file__).parent.parent.parent
         raw_db = get("storage.vector_db", "")
-
-        if raw_db:
-            db_path = Path(raw_db)
-        elif _EXT_DRIVE.exists():
-            db_path = _EXT_DRIVE / "vector_db"
-        else:
-            logger.warning("⚠️  T7 Shield not mounted — vector DB falling back to LOCAL SSD!")
-            db_path = Path(__file__).parent.parent.parent / "data" / "vector_db"
-
-        if str(db_path).startswith("/Volumes/") and not Path("/Volumes/T7 Shield").exists():
-            raise RuntimeError(
-                "External drive 'T7 Shield' is not mounted. "
-                "Connect it and restart."
-            )
+        db_path = Path(raw_db) if raw_db else _project_root / "cache" / "vector_db"
 
         db_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Vector DB → {db_path.resolve()}")
@@ -99,13 +86,9 @@ class VectorStore:
         )
 
         # ── Embedding model cache ─────────────────────────────────────────────
+        _project_root2 = Path(__file__).parent.parent.parent
         raw_cache = get("storage.hf_cache", "")
-        if raw_cache:
-            cache_dir = Path(raw_cache).expanduser()
-        elif _EXT_DRIVE.exists():
-            cache_dir = _EXT_DRIVE / "hf_cache"
-        else:
-            cache_dir = Path(__file__).parent.parent.parent / "data" / "hf_cache"
+        cache_dir = Path(raw_cache).expanduser() if raw_cache else _project_root2 / "cache" / "hub"
 
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_dir_str = str(cache_dir.resolve())

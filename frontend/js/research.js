@@ -4,6 +4,17 @@ function handleResearchKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); startResearch(); }
 }
 
+/** Called when user clicks ⚡ Now — fires a POST to interrupt the pipeline */
+async function showResultNow() {
+  const btn = document.getElementById('show-now-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Stopping…'; }
+  try {
+    await fetch(`${API}/research/show-now`, { method: 'POST' });
+  } catch (e) {
+    console.warn('show-now failed:', e);
+  }
+}
+
 async function startResearch() {
   const input = document.getElementById('research-input');
   const query = input.value.trim();
@@ -38,6 +49,38 @@ async function startResearch() {
   setBusy(true);
   setResearchBusy(true);
 
+  /* ── Live stats tracker ─────────────────────────────────────────────── */
+  // Estimates time remaining + AI queries left based on progress events.
+  // Assumptions (conservative): 5 pages/task × 10 chunks/page × 1 AI call/chunk
+  //   + 1 synthesis/page + 1 self-critique/task + 1 final report = ~58 calls/task
+  const CALLS_PER_TASK   = 58;   // rough AI calls per research task
+  const SECS_PER_CALL    = 18;   // ~18s per AI generation at 10-14 tok/s
+  let   _totalTasks      = 0;
+  let   _currentTask     = 0;
+  let   _aiCallsDone     = 0;    // incremented on each status with chunk/analyse
+
+  function _updateStatusBar(taskLabel) {
+    const taskEl = document.getElementById('rsb-task');
+    const qEl    = document.getElementById('rsb-q-val');
+    const tEl    = document.getElementById('rsb-t-val');
+    if (taskEl && taskLabel) taskEl.textContent = taskLabel;
+    if (_totalTasks > 0) {
+      const tasksLeft    = Math.max(0, _totalTasks - _currentTask);
+      const queriesLeft  = tasksLeft * CALLS_PER_TASK + 1; // +1 for report
+      const secsLeft     = queriesLeft * SECS_PER_CALL;
+      if (qEl) qEl.textContent = queriesLeft.toLocaleString();
+      if (tEl) tEl.textContent = _fmtTime(secsLeft);
+    }
+  }
+
+  function _fmtTime(secs) {
+    if (secs < 60)   return `${Math.round(secs)}s`;
+    if (secs < 3600) return `${Math.round(secs / 60)}m`;
+    const h = Math.floor(secs / 3600);
+    const m = Math.round((secs % 3600) / 60);
+    return `${h}h ${m}m`;
+  }
+
   /* Thought-process: first step */
   addThinkStep('Planning research…', 'step');
   addStep('🧠 Planning research…', 'active');
@@ -71,6 +114,16 @@ async function startResearch() {
         switch (ev.type) {
 
           case 'status': {
+            /* Count AI calls for time estimate */
+            const m = ev.message || '';
+            if (m.includes('📝 Chunk') || m.includes('🔀 Synth') ||
+                m.includes('🔄 Self-critique') || m.includes('📝 Writing report')) {
+              _aiCallsDone++;
+            }
+            /* Update status bar label with the latest status message */
+            if (m && !m.includes('Phase 0') && _currentTask > 0) {
+              _updateStatusBar(`[${_currentTask}/${_totalTasks}] ${m.replace(/^[\s📝🧠🔀🔄✅⚠️❌📄]+/, '').slice(0, 60)}`);
+            }
             /* Route to crawl panel first; only add to step list if not consumed */
             const consumed = _routeStatusToCrawl(ev.message);
             if (!consumed) addStep(ev.message, 'active');
@@ -80,6 +133,8 @@ async function startResearch() {
           }
 
           case 'plan':
+            _totalTasks = ev.plan.length;
+            _updateStatusBar(`Planning complete — ${_totalTasks} tasks`);
             addStep(`📋 Plan ready — ${ev.plan.length} tasks`, 'done');
             addThinkStep(`Plan ready — ${ev.plan.length} tasks`, 'plan');
             ev.plan.forEach((t, i) => {
@@ -89,6 +144,8 @@ async function startResearch() {
             break;
 
           case 'progress': {
+            _currentTask = ev.current;
+            _updateStatusBar(`Task ${ev.current}/${ev.total}: ${(ev.task || '').slice(0, 55)}`);
             const pct = Math.round((ev.current / ev.total) * 80);
             document.getElementById('progress-bar').style.width  = pct + '%';
             document.getElementById('progress-label').textContent =

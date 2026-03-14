@@ -18,7 +18,7 @@ venv/
 .venv/
 env/
 
-# ── Data / model cache (heavy assets on external drive) ───────────────────────
+# ── Data / model cache (heavy assets — local only) ────────────────────────────
 data/
 model_cache/
 hf_cache/
@@ -47,8 +47,17 @@ logs/
 # ── Tilde dir (accidental mkdir ~) ────────────────────────────────────────────
 ~/
 
+# ── Local model cache (all weights stored here — never commit) ───────────────
+cache/
+
 # ── HuggingFace local cache inside project ────────────────────────────────────
 .cache/
+
+# ── Local model weights (never commit — can be 10s of GB) ────────────────────
+cache/
+
+# ── Local model weights (all stored under cache/ — never commit) ──────────────
+cache/
 
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store

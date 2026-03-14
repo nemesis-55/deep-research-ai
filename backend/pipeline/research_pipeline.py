@@ -67,15 +67,23 @@ class ResearchPipeline:
         self.kg           = KnowledgeGraph()
         self.planner      = PlannerAgent()
         self.reporter     = ReportAgent(self.vector_store)
+        self._show_now    = False   # set by request_show_now()
+
+    def request_show_now(self) -> None:
+        """Called from the /research/show-now endpoint to interrupt task loop."""
+        self._show_now = True
+        logger.info("[Pipeline] ⚡ Show-Now requested — will stop after current task")
 
     async def run(
         self,
         query:          str,
         uploaded_files: Optional[List[str]] = None,
+        show_now:       bool = False,
     ) -> AsyncGenerator[dict, None]:
 
         loop        = asyncio.get_event_loop()
         all_sources: List[dict] = []
+        self._show_now = show_now   # reset flag for this run
 
         _SEP = "═" * 65
         logger.info(f"\n{_SEP}")
@@ -265,18 +273,66 @@ class ResearchPipeline:
             yield {"type": "progress", "current": i, "total": len(plan), "task": task}
             yield {"type": "status",   "message": f"[{i}/{len(plan)}] 🔍 {task[:90]}"}
 
-            status_buf: List[str] = []
+            # ── Live-streaming status via asyncio.Queue ────────────────────
+            # The research_task runs in a thread (run_in_executor). We bridge
+            # sync status_callback → async SSE by pushing into a Queue and
+            # draining it concurrently with the task using asyncio.gather().
+            _SENTINEL = object()
+            status_q: asyncio.Queue = asyncio.Queue()
+
+            def _cb(msg: str) -> None:
+                loop.call_soon_threadsafe(status_q.put_nowait, msg)
+
+            async def _drain_status_q() -> None:
+                while True:
+                    item = await status_q.get()
+                    if item is _SENTINEL:
+                        break
+                    # yielding from a nested coroutine doesn't work — store for emission
+                    _live_msgs.append(item)
+
+            _live_msgs: List[str] = []
+
+            async def _run_task(t: str):
+                try:
+                    result = await loop.run_in_executor(
+                        None,
+                        lambda: researcher.research_task(t, status_callback=_cb),
+                    )
+                finally:
+                    loop.call_soon_threadsafe(status_q.put_nowait, _SENTINEL)
+                return result
+
+            # Run task + drain concurrently, yielding live msgs as they arrive
+            sources = []
+            task_future = asyncio.ensure_future(_run_task(task))
             try:
-                sources = await loop.run_in_executor(
-                    None,
-                    lambda t=task: researcher.research_task(t, status_callback=status_buf.append),
-                )
+                while not task_future.done():
+                    # Drain any queued messages without blocking the event loop
+                    try:
+                        while True:
+                            msg = status_q.get_nowait()
+                            if msg is _SENTINEL:
+                                break
+                            yield {"type": "status", "message": msg}
+                    except asyncio.QueueEmpty:
+                        pass
+                    await asyncio.sleep(0.1)
+
+                # Final drain after task completes
+                try:
+                    while True:
+                        msg = status_q.get_nowait()
+                        if msg is _SENTINEL:
+                            break
+                        yield {"type": "status", "message": msg}
+                except asyncio.QueueEmpty:
+                    pass
+
+                sources = task_future.result()
             except Exception as e:
                 yield {"type": "status", "message": f"  ❌ Task failed: {e}"}
                 continue
-
-            for msg in status_buf:
-                yield {"type": "status", "message": msg}
 
             # Emit any think blocks produced during this task's AI calls
             for ev in _drain_think(loop):
@@ -298,6 +354,15 @@ class ResearchPipeline:
 
             # Emit incremental KG snapshot after each task
             yield {"type": "graph", "graph": self.kg.to_json()}
+
+            # ── Show-Now check: stop after this task and go straight to report ─
+            if self._show_now:
+                remaining = len(plan) - i
+                yield {
+                    "type":    "status",
+                    "message": f"⚡ Show Now — skipping {remaining} remaining task(s), generating report…",
+                }
+                break
 
         # ── Step 5: Filter sources by credibility ─────────────────────────
         before = len(all_sources)

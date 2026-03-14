@@ -27,10 +27,8 @@ LOG_DIR     = ROOT_DIR / "logs"
 METRICS_DIR = LOG_DIR / "metrics"
 FRONTEND_DIR = ROOT_DIR / "frontend"
 
-# ── External storage ───────────────────────────────────────────────────────────
-EXT_DRIVE      = Path("/Volumes/T7 Shield/DeepResearchAI")
-EXT_UPLOAD_DIR = EXT_DRIVE / "uploads"
-LOCAL_UPLOAD_DIR = ROOT_DIR / "data" / "uploads"   # fallback when T7 not mounted
+# ── Upload storage (local only) ───────────────────────────────────────────────
+UPLOAD_DIR = ROOT_DIR / "data" / "uploads"
 
 # ── Server ─────────────────────────────────────────────────────────────────────
 DEFAULT_HOST = "0.0.0.0"
@@ -91,16 +89,19 @@ SEARCH_PHRASES: tuple[str, ...] = (
     "what is happening", "price of", "stock", "share price", "market",
 )
 
-# ── Adaptive scraping thresholds ──────────────────────────────────────────────
-CHAT_SEARCH_MAX_RESULTS     = 10    # DDG result pool
-CHAT_SCRAPE_INITIAL_URLS    = 3     # always scrape at least 3
-CHAT_SCRAPE_MAX_URLS        = 10    # scrape up to 10 when confidence is low
+# ── Adaptive scraping thresholds (CHAT only — deep research uses config.yaml) ─
+# Chat web search is intentionally limited: fast response matters more than depth.
+# Deep research search limits live in config.yaml: research.max_results_per_task
+#   and deep_crawl.results_per_query (both default 50).
+CHAT_SEARCH_MAX_RESULTS      = 10   # DDG result pool for chat  (fixed at 10)
+CHAT_SCRAPE_INITIAL_URLS     = 3    # auto-mode: always scrape at least 3 pages
+CHAT_SCRAPE_MAX_URLS         = 10   # forced-on mode (🌐 toggle): scrape up to 10 pages
 CHAT_SCRAPE_CONFIDENCE_THRESH = 0.65
-CHAT_SCRAPE_TARGET_CHARS    = 15_000   # raised: more content = better answers
-CHAT_SCRAPE_MIN_USEFUL_CHARS = 800     # skip stub/index pages below this
+CHAT_SCRAPE_TARGET_CHARS     = 15_000
+CHAT_SCRAPE_MIN_USEFUL_CHARS  = 800     # skip stub/index pages below this
 
-# Max chars injected into LLM prompt — 32k chars ≈ 8k tokens, fits in context
-CHAT_SCRAPE_MAX_CHARS = 32_000
+# Max chars injected into LLM prompt — 80k chars ≈ 20k tokens, well within 32k context window
+CHAT_SCRAPE_MAX_CHARS = 80_000
 
 # Max chars of prompt logged to terminal
 PROMPT_LOG_MAX_CHARS  = 6_000

@@ -48,21 +48,26 @@ logger = logging.getLogger(__name__)
 
 # ── Storage helpers ───────────────────────────────────────────────────────────
 
+def _project_root() -> Path:
+    return Path(__file__).parent.parent   # deep_research_ai/
+
 def _models_dir() -> Path:
-    p = Path(get("storage.models", "/Volumes/T7 Shield/DeepResearchAI/models"))
+    raw = get("storage.models", "cache/models")
+    p   = Path(raw) if Path(raw).is_absolute() else _project_root() / raw
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-def _hf_cache() -> str:
-    raw = get("storage.hf_cache", "~/.cache/huggingface/hub")
-    p   = Path(raw).expanduser()
-    p.mkdir(parents=True, exist_ok=True)
-    # Set HF_HOME so mlx_lm.load() / snapshot_download() also use this path
-    # without needing an explicit cache_dir argument everywhere.
+def _hf_cache() -> Path:
+    """Return the HF hub cache directory (always local, inside project cache/)."""
     import os as _os
-    _os.environ.setdefault("HF_HOME", str(p.parent))   # HF_HOME = ~/.cache/huggingface
-    _os.environ.setdefault("HF_HUB_CACHE", str(p))     # HF_HUB_CACHE = .../hub
-    return str(p)
+    raw = get("storage.hf_cache", "cache/hub")
+    p   = Path(raw) if Path(raw).is_absolute() else _project_root() / raw
+    p.mkdir(parents=True, exist_ok=True)
+    # Keep HF env vars in sync so mlx_lm.load() / snapshot_download() use this path
+    _os.environ["HF_HUB_OFFLINE"] = "0"           # always online
+    _os.environ["HF_HOME"]        = str(p.parent)
+    _os.environ["HF_HUB_CACHE"]   = str(p)
+    return p
 
 
 # ── ModelHandle ───────────────────────────────────────────────────────────────
@@ -157,27 +162,75 @@ def _load_llama_cpp(role: str, cfg: dict) -> ModelHandle:
 
 
 def _download_gguf(cfg: dict) -> None:
+    """Download GGUF from HuggingFace and save it to the configured gguf_path alias.
+
+    hf_hub_download writes to local_dir/<filename>.  We then rename to the
+    short alias path so _load_llama_cpp can always find it via cfg['gguf_path'].
+    """
+    import shutil
     from huggingface_hub import hf_hub_download  # type: ignore
-    token = get("huggingface.token", "") or None
-    dest  = _models_dir()
-    logger.info(f"  Downloading {cfg['gguf_filename']} from {cfg['gguf_repo']}…")
-    hf_hub_download(
+
+    token      = get("huggingface.token", "") or None
+    dest_dir   = _models_dir()
+    alias_path = Path(cfg["gguf_path"])          # e.g. …/deepseek_r1_8b_q4.gguf
+    hf_name    = cfg["gguf_filename"]            # e.g. DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf
+
+    logger.info(f"  Downloading {hf_name} from {cfg['gguf_repo']}…")
+    downloaded = hf_hub_download(
         repo_id   = cfg["gguf_repo"],
-        filename  = cfg["gguf_filename"],
-        local_dir = str(dest),
+        filename  = hf_name,
+        local_dir = str(dest_dir),
         token     = token,
     )
-    logger.info(f"  Saved → {dest / cfg['gguf_filename']}")
+    downloaded_path = Path(downloaded)
+
+    # Rename HF filename → alias path expected by _load_llama_cpp
+    if downloaded_path.resolve() != alias_path.resolve():
+        alias_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(downloaded_path), str(alias_path))
+        logger.info(f"  Renamed {downloaded_path.name} → {alias_path.name}")
+
+    logger.info(f"  Saved → {alias_path}")
 
 
 # ── MLX loader (ALTERNATIVE) ──────────────────────────────────────────────────
+
+def _resolve_mlx_path(repo: str) -> str:
+    """
+    Return the local snapshot directory for an HF repo if it exists in
+    cache/hub, otherwise return the repo ID for online download.
+
+    mlx_lm.load() does NOT accept a cache_dir kwarg — the only way to
+    guarantee it reads from our local cache/ folder is to pass the full
+    absolute path to the snapshot directory directly.
+    """
+    cache = _hf_cache()
+    # HF on-disk layout: models--<org>--<name>/snapshots/<hash>/
+    folder = "models--" + repo.replace("/", "--")
+    snapshots_dir = cache / folder / "snapshots"
+    if snapshots_dir.exists():
+        # pick the first (and normally only) snapshot hash
+        snaps = sorted(snapshots_dir.iterdir())
+        if snaps:
+            resolved = str(snaps[-1].resolve())
+            logger.info(f"  → resolved local path: {resolved}")
+            return resolved
+    # Fallback: let mlx_lm download via HF hub (env vars already set)
+    logger.warning(f"  → no local snapshot found for {repo}, will download")
+    return repo
+
 
 def _load_mlx(role: str, cfg: dict) -> ModelHandle:
     from mlx_lm import load as mlx_load   # type: ignore
 
     repo = cfg["mlx_repo"]
-    logger.info(f"[{role.upper()}] Loading MLX repo: {repo}")
-    model, tokenizer = mlx_load(repo, tokenizer_config={"trust_remote_code": True})
+    path = _resolve_mlx_path(repo)
+
+    logger.info(f"[{role.upper()}] Loading MLX: {path}")
+    model, tokenizer = mlx_load(
+        path,
+        tokenizer_config={"trust_remote_code": True},
+    )
     logger.info(f"[{role.upper()}] ✅  MLX model ready: {cfg['name']}")
     return ModelHandle(
         role           = role,

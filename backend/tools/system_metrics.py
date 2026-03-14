@@ -151,19 +151,6 @@ def collect() -> Dict:
     except Exception:
         disk = {}
 
-    # External T7 Shield (optional)
-    ext_disk: Optional[Dict] = None
-    try:
-        d = psutil.disk_usage("/Volumes/T7 Shield")
-        ext_disk = {
-            "total_bytes": d.total,
-            "used_bytes":  d.used,
-            "free_bytes":  d.free,
-            "pct":         round(d.percent, 1),
-        }
-    except Exception:
-        pass
-
     # ── This process ─────────────────────────────────────────────────────────
     try:
         proc = psutil.Process()
@@ -187,7 +174,6 @@ def collect() -> Dict:
         "ram":       ram,
         "gpu":       gpu,
         "disk":      disk,
-        "ext_disk":  ext_disk,
         "process":   process,
     }
 

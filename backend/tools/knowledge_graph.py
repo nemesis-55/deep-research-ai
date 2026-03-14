@@ -33,7 +33,7 @@ from backend.config_loader import get
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PATH = "/Volumes/T7 Shield/DeepResearchAI/knowledge_graph.json"
+_DEFAULT_PATH = str(Path(__file__).parent.parent.parent / "cache" / "knowledge_graph.json")
 
 
 class KnowledgeGraph:

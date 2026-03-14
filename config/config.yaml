@@ -1,39 +1,33 @@
+# Deep Research AI — Configuration
+# All paths are relative to the project root or absolute local paths.
+# No external drive dependencies — everything lives inside cache/ (git-ignored).
+
 huggingface:
-  # Leave blank — token is loaded from the .env file or HF_TOKEN env variable.
+  # Leave blank — token loaded from HF_TOKEN env variable or .env file
   token: ""
 
-# ── Storage paths ─────────────────────────────────────────────────────────────
-# hf_cache → internal NVMe SSD (3.3 GB/s) for fast model weight loading.
-#            MLX safetensors copied here from T7 Shield — see scripts/start.py.
-# Everything else (uploads, vector_db, GGUF models) stays on T7 Shield.
+# ── Storage (all local, inside project) ───────────────────────────────────────
 storage:
-  base:            "/Volumes/T7 Shield/DeepResearchAI"
-  models:          "/Volumes/T7 Shield/DeepResearchAI/model_cache"
-  vector_db:       "/Volumes/T7 Shield/DeepResearchAI/vector_db"
-  uploads:         "/Volumes/T7 Shield/DeepResearchAI/uploads"
-  knowledge_graph: "/Volumes/T7 Shield/DeepResearchAI/knowledge_graph.json"
-  hf_cache:        "~/.cache/huggingface/hub"
+  base:            "cache"
+  models:          "cache/models"
+  vector_db:       "cache/vector_db"
+  uploads:         "cache/uploads"
+  knowledge_graph: "cache/knowledge_graph.json"
+  hf_cache:        "cache/hub"             # HuggingFace model weights (MLX)
 
-# ── Model registry ────────────────────────────────────────────────────────────
-# runtime:   "llama_cpp" (primary — most memory-efficient on Apple Silicon Metal)
-#            "mlx"       (alternative — requires mlx-lm installed)
-# All models load from GGUF files on the external drive.
-# Models are NEVER loaded simultaneously — swap_model() enforces this.
+# ── Model registry ─────────────────────────────────────────────────────────────
+# runtime: "mlx" → Apple Silicon GPU via mlx-lm
+# One model in memory at a time — sequential swap enforced by model_manager.
 #
-# 16 GB budget:
-#   planner  (DeepSeek-R1 8B  Q4_K_M) ≈ 5.5 GB
-#   writer   (Qwen2.5-7B      Q4_K_M) ≈ 4.8 GB
-#   chat     (Qwen2.5-7B      Q4_K_M) ≈ 4.8 GB  ← same file, different role
-#   embedder (bge-small-en)            ≈ 0.1 GB  ← stays loaded always
-#   OS + pipeline overhead             ≈ 2–3 GB
-#   Total peak (one model at a time)  ≈ 8–9 GB  ✅ safe
+# Memory budget (16 GB unified):
+#   planner  (DeepSeek-R1 8B  4-bit) ≈ 5.0 GB
+#   writer   (Qwen2.5-7B      4-bit) ≈ 4.0 GB
+#   chat     (Qwen2.5-7B      4-bit) ≈ 4.0 GB  ← same weights, different role
+#   embedder (bge-small-en)          ≈ 0.1 GB  ← always loaded
 models:
   planner:
-    name:           "DeepSeek-R1-Distill-Llama-8B (Q4_K_M GGUF)"
-    runtime:        llama_cpp
-    gguf_path:      "/Volumes/T7 Shield/DeepResearchAI/model_cache/deepseek_r1_8b_q4.gguf"
-    gguf_repo:      "bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF"
-    gguf_filename:  "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
+    name:           "DeepSeek-R1-Distill-Llama-8B (MLX 4-bit)"
+    runtime:        mlx
     mlx_repo:       "mlx-community/DeepSeek-R1-Distill-Llama-8B-4bit"
     context_length: 8192
     max_new_tokens: 1024
@@ -42,49 +36,62 @@ models:
   writer:
     name:           "Qwen2.5-7B-Instruct (MLX 4-bit)"
     runtime:        mlx
-    gguf_path:      "/Volumes/T7 Shield/DeepResearchAI/model_cache/qwen25_7b_q4.gguf"
-    gguf_repo:      "Qwen/Qwen2.5-7B-Instruct-GGUF"
-    gguf_filename:  "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
     mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
-    context_length: 16384
+    context_length: 32768
     max_new_tokens: 4096
     temperature:    0.7
 
   chat:
     name:           "Qwen2.5-7B-Instruct (MLX 4-bit)"
     runtime:        mlx
-    gguf_path:      "/Volumes/T7 Shield/DeepResearchAI/model_cache/qwen25_7b_q4.gguf"
-    gguf_repo:      "Qwen/Qwen2.5-7B-Instruct-GGUF"
-    gguf_filename:  "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf"
     mlx_repo:       "mlx-community/Qwen2.5-7B-Instruct-4bit"
-    context_length: 8192
-    max_new_tokens: 1024
+    context_length: 32768
+    max_new_tokens: 4096
     temperature:    0.7
 
   embedding:
     name:    "BAAI/bge-small-en-v1.5"
     hf_repo: "BAAI/bge-small-en-v1.5"
 
+# ── Server ─────────────────────────────────────────────────────────────────────
 server:
   host: 0.0.0.0
   port: 8000
 
+# ── Search ─────────────────────────────────────────────────────────────────────
 search:
-  max_results: 8
-  max_pages_to_scrape: 5
+  max_results:         50    # DDG result pool for deep research (10 / 20 / 50 / 100)
+  max_pages_to_scrape: 10    # pages scraped per deep-research task
 
+# ── Vector DB ──────────────────────────────────────────────────────────────────
 vector_db:
   collection:    research_memory
   chunk_size:    1000
   chunk_overlap: 150
 
+# ── Knowledge Graph ────────────────────────────────────────────────────────────
 knowledge_graph:
   max_entities_per_source: 20
-  min_confidence: 0.5
+  min_confidence:          0.5
 
+# ── Deep Crawl ─────────────────────────────────────────────────────────────────
+# Phase-0 multi-query fan-out crawl before the main research tasks.
+# num_queries:        how many diverse queries to generate from the topic
+# results_per_query:  DDG results per query (10 / 20 / 50 / 100)
+# refine_threshold:   if fewer articles stored, run a second crawl pass
+deep_crawl:
+  enabled:           true
+  num_queries:       10
+  results_per_query: 50    # configurable: 10 | 20 | 50 | 100
+  refine_threshold:  8
+  rag_top_k:         10
+
+# ── Research pipeline ──────────────────────────────────────────────────────────
+# max_results_per_task: DDG results fetched per research sub-task (10 / 20 / 50 / 100)
+# max_pages_per_task:   pages actually scraped & analysed from those results (≤ max_results)
 research:
-  max_results_per_task: 8
-  max_pages_per_task:   5
+  max_results_per_task: 50   # configurable: 10 | 20 | 50 | 100
+  max_pages_per_task:   10   # configurable: 3 | 5 | 10 | 20
   research_loops:       3
   max_content_chars:    30000
   chunk_size:           1000
@@ -97,33 +104,12 @@ research:
   sequential_loading:   true
   source_min_score:     50
 
+# ── Generation defaults ────────────────────────────────────────────────────────
 generation:
-  top_p:     0.9
-  do_sample: true
+  top_p: 0.9
 
-# ── Metrics logging ───────────────────────────────────────────────────────────
-# Hardware + inference metrics are written as JSONL to logs/metrics/.
-# Each line is a JSON object.  Two record types:
-#   "hw"        — periodic hardware snapshot (CPU/RAM/GPU/disk/process)
-#   "inference" — one record per generation (role, tokens, elapsed, tok/s)
-#   "startup" / "shutdown" / custom events
-#
-# interval_s — how often to sample hardware (default 30 s)
-# keep_days  — delete daily files older than this (default 7)
-# dir        — relative to project root; absolute paths also accepted
+# ── Metrics logging ────────────────────────────────────────────────────────────
 metrics_log:
-  dir:        "logs/metrics"
   interval_s: 30
-  keep_days:  7
-
-# ── Deep multi-query crawl (Phase 0) ─────────────────────────────────────────
-# Runs BEFORE the main planner to pre-populate the vector store with real web
-# evidence.  All values can be tuned without touching Python code.
-deep_crawl:
-  enabled:           true   # set false to skip Phase 0 entirely
-  num_queries:       10     # how many search queries to generate
-  results_per_query: 10     # DDG results to fetch per query (10×10 = 100 URLs)
-  max_articles:      30     # how many articles to actually scrape
-  min_doc_chars:     200    # discard pages shorter than this
-  refine_threshold:  8      # if stored docs < this, run a second search round
-  rag_top_k:         10     # passages retrieved from vector store for report synthesis
+  keep_days:   7
+  dir:         "logs/metrics"

@@ -30,16 +30,19 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
 
+# ── Always keep HuggingFace Hub ONLINE so models auto-download if missing ─────
+os.environ["HF_HUB_OFFLINE"] = "0"   # override any stale shell export
+
 # ── Silence ALL HuggingFace / tqdm progress bars before any HF import ─────────
 # Must be set BEFORE huggingface_hub is imported for the first time.
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 os.environ["DISABLE_TQDM"] = "1"  # older hf_hub versions honour this
 
-# ── Point HF cache at internal NVMe SSD (3.3 GB/s vs 1 GB/s on T7 Shield) ────
-# MLX safetensors live here after the one-time copy done below.
-# This must be set before any huggingface_hub import so snapshot_download
-# and mlx_lm.load() both pick it up automatically.
-_LOCAL_HF_CACHE = Path.home() / ".cache" / "huggingface" / "hub"
+# ── Point HF cache at local project cache/ folder ────────────────────────────
+# model_manager._hf_cache() resolves this from config.yaml (storage.hf_cache).
+# Setting env vars here ensures any direct huggingface_hub / mlx_lm import
+# before model_manager is loaded also picks up the right location.
+_LOCAL_HF_CACHE = ROOT / "cache" / "hub"
 _LOCAL_HF_CACHE.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("HF_HOME",      str(_LOCAL_HF_CACHE.parent))
 os.environ.setdefault("HF_HUB_CACHE", str(_LOCAL_HF_CACHE))
@@ -148,8 +151,6 @@ REQUIRED = {
     # ML — MLX (primary runtime on Apple Silicon)
     "mlx":                    "mlx",
     "mlx_lm":                 "mlx-lm",
-    # ML — llama_cpp (GGUF — primary if installed)
-    "llama_cpp":              "llama-cpp-python",
     # HuggingFace (prefetch + embedding)
     "huggingface_hub":        "huggingface_hub",
     "transformers":           "transformers",
@@ -173,18 +174,17 @@ REQUIRED = {
 }
 
 # Packages that are optional — warn but don't abort if missing
-OPTIONAL = {"mlx", "mlx_lm", "llama_cpp", "pytesseract", "youtube_transcript_api"}
+OPTIONAL = {"mlx", "mlx_lm", "pytesseract", "youtube_transcript_api"}
 
 
 def check_requirements() -> None:
     _banner("🔍  Step 1 — Requirements check")
 
-    ext_drive = Path("/Volumes/T7 Shield/DeepResearchAI")
-    if ext_drive.exists():
-        print(f"  ✅  T7 Shield mounted  →  {ext_drive}")
+    cache_dir = ROOT / "cache" / "hub"
+    if cache_dir.exists():
+        print(f"  ✅  Local model cache  →  {cache_dir.relative_to(ROOT)}")
     else:
-        print("  ⚠️   T7 Shield NOT mounted — model downloads / uploads")
-        print("       will use local fallback paths.")
+        print(f"  ℹ️   cache/hub not found yet — will be created during prefetch (Step 2).")
 
     # Use find_spec() — checks package exists on disk WITHOUT importing it.
     # importlib.import_module() triggers full module __init__ (transformers,
@@ -236,32 +236,9 @@ def prefetch() -> None:
 
 
 # ── HF offline toggle ────────────────────────────────────────────────────────
-# mlx_lm.load() calls snapshot_download() internally which fires HTTP HEAD
-# requests to huggingface.co to verify each cached file's etag — even when
-# ALL weights are already on disk.  On a slow or absent network this adds
-# 100-250 s of "resolving cache" stall before a single byte is read.
-#
-# Setting HF_HUB_OFFLINE=1 bypasses all network I/O and tells hf_hub to use
-# whatever is in the local cache unconditionally — safe once prefetch() has
-# already run and confirmed the weights are present.
-#
-# We toggle it OFF again after load so the server itself can still reach HF
-# (e.g. for future snapshot_download calls during research).
-
-def _set_hf_offline(on: bool) -> None:
-    """Toggle HuggingFace Hub offline mode on/off."""
-    val = "1" if on else "0"
-    os.environ["HF_HUB_OFFLINE"] = val
-    # Also patch the live huggingface_hub constant if already imported
-    try:
-        import huggingface_hub.constants as _hfc
-        _hfc.HF_HUB_OFFLINE = on
-    except Exception:
-        pass
-    if on:
-        print("  🔒  HF_HUB_OFFLINE=1 — using local cache only (no etag HTTP calls)")
-    else:
-        print("  🔓  HF_HUB_OFFLINE=0 — HuggingFace network access restored")
+# HuggingFace Hub is always kept ONLINE so mlx_lm.load() can download
+# missing weights automatically. If the model is already cached, mlx_lm
+# will use the local cache and only fire a lightweight etag check.
 
 
 def load_model() -> None:
@@ -271,7 +248,7 @@ def load_model() -> None:
     """
     _banner("🧠  Step 3 — Loading chat model into Metal (MLX 4-bit)")
     print("  Model  : Qwen2.5-7B-Instruct (MLX 4-bit)")
-    print("  Source : internal NVMe SSD (~3.3 GB/s)  ← copied from T7 Shield")
+    print("  Source : local cache/ (project folder)")
     print("  Size   : ~4.0 GB safetensors\n")
 
     import psutil
@@ -309,8 +286,6 @@ def load_model() -> None:
         finally:
             done.set()
 
-    # Set offline BEFORE spawning the thread so mlx_lm.load() never reaches HF
-    _set_hf_offline(True)
     t = threading.Thread(target=_do_load, daemon=True)
     t.start()
 
@@ -368,12 +343,9 @@ def load_model() -> None:
 
     print()
 
-    # Restore HF network access for the running server
-    _set_hf_offline(False)
-
     if error:
         print(f"\n❌  Model load failed: {error[0]}")
-        print("    Check that the MLX weights exist on the internal SSD.")
+        print("    Check that the MLX weights exist in cache/hub/.")
         sys.exit(1)
 
     elapsed   = int(time.time() - start)

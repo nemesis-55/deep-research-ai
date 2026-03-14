@@ -74,31 +74,40 @@ class ResearchAgent:
             start += self.chunk_size - self.chunk_overlap
         return chunks
 
-    def _analyse_source(self, task: str, url: str, title: str, text: str) -> str:
+    def _analyse_source(
+        self,
+        task: str,
+        url: str,
+        title: str,
+        text: str,
+        status_callback: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        def _status(msg: str) -> None:
+            logger.info(msg)
+            if status_callback:
+                status_callback(msg)
+
         text   = text[: get("research.max_content_chars", 30000)]
         chunks = self._chunk(text)
         total  = len(chunks)
         analyses = []
 
-        logger.debug(
-            f"[ResearchAgent] _analyse_source  chunks={total}  "
-            f"text_len={len(text):,}  url={url[:70]}"
+        _status(
+            f"  📄 Analysing {title[:50] or url[:50]} — {total} chunk(s)"
         )
 
         for i, chunk in enumerate(chunks, 1):
-            logger.info(f"[ResearchAgent]   📝 Chunk {i}/{total}  ({len(chunk):,} chars) ← {url[:60]}")
+            _status(f"  📝 Chunk {i}/{total} ← {url[:60]}")
             out = generate_text(
                 _CHUNK_PROMPT.format(task=task, url=url, chunk_num=i, total_chunks=total, content=chunk),
                 max_new_tokens=600, role="writer",
             )
-            logger.debug(f"[ResearchAgent]   Chunk {i} output: {len(out):,} chars")
             analyses.append(out)
 
         if len(analyses) == 1:
-            logger.debug(f"[ResearchAgent]   Single chunk — returning directly")
             return analyses[0]
 
-        logger.info(f"[ResearchAgent]   🔀 Synthesising {len(analyses)} chunk analyses for {url[:60]}")
+        _status(f"  🔀 Synthesising {len(analyses)} chunks for {url[:60]}")
         synthesis = generate_text(
             _SYNTHESIS_PROMPT.format(
                 task=task, title=title, url=url,
@@ -106,7 +115,6 @@ class ResearchAgent:
             ),
             max_new_tokens=1000, role="writer",
         )
-        logger.debug(f"[ResearchAgent]   Synthesis output: {len(synthesis):,} chars")
         return synthesis
 
     def _self_critique(self, task: str, summary: str) -> str:
@@ -194,7 +202,7 @@ class ResearchAgent:
                 continue
 
             _status(f"  🧠 Analysing: {title[:60]} ({len(text):,} chars)")
-            analysis   = self._analyse_source(task, url, title, text)
+            analysis   = self._analyse_source(task, url, title, text, status_callback=status_callback)
             all_images = list(page.get("images", []))
 
             followed_sources = page.get("followed_sources", [])

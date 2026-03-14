@@ -112,114 +112,61 @@ def get_device() -> str:
 
 def prefetch_models() -> dict:
     """
-    Download all model weights to disk without loading into GPU memory.
-    MLX repos → snapshot_download.
-    GGUF files → hf_hub_download if not already on disk.
+    Download all model weights into cache/ if not already present.
+    Shows a real tqdm progress bar for each download.
+    Skips any repo that already has a complete snapshot on disk.
     """
     from pathlib import Path
-    from huggingface_hub import snapshot_download, hf_hub_download
+    from huggingface_hub import snapshot_download
     from backend.config_loader import get as cfg_get
-    from backend.model_manager import _hf_cache, _models_dir
+    from backend.model_manager import _hf_cache
 
-    # Ensure HF progress bars are off regardless of import order.
-    # hf_hub reads this flag lazily so setting it here (before any
-    # snapshot_download call) is always effective.
-    import os as _os
-    _os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-
-    # Also patch hf_hub's internal tqdm reference — the module caches
-    # it at import time so the env var alone is not always enough.
-    import threading as _threading, importlib as _il
-    class _Silent:
-        _lock = _threading.RLock()
-        def __init__(self, *a, **kw):        pass
-        def __iter__(self):                  return iter([])
-        def __len__(self):                   return 0
-        def __enter__(self):                 return self
-        def __exit__(self, *a):              pass
-        def update(self, *a, **kw):          pass
-        def close(self, *a, **kw):           pass
-        def set_description(self, *a, **kw): pass
-        def set_postfix(self, *a, **kw):     pass
-        def refresh(self, *a, **kw):         pass
-        def reset(self, *a, **kw):           pass
-        @classmethod
-        def get_lock(cls):                   return cls._lock
-        @classmethod
-        def set_lock(cls, lock):             cls._lock = lock
-        @classmethod
-        def write(cls, s, *a, **kw):         pass
-
-    for _mod_name in (
-        "huggingface_hub.file_download",
-        "huggingface_hub._snapshot_download",
-        "huggingface_hub.utils",
-        "huggingface_hub.lfs",
-    ):
-        try:
-            _mod = _il.import_module(_mod_name)
-            for _attr in list(vars(_mod).keys()):
-                _val = getattr(_mod, _attr, None)
-                try:
-                    if isinstance(_val, type) and _attr.lower().startswith("tqdm"):
-                        setattr(_mod, _attr, _Silent)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
+    cache   = _hf_cache()          # project_root/cache/hub  (Path)
     token   = cfg_get("huggingface.token", "") or None
-    cache   = _hf_cache()
     results: dict = {}
 
-    roles = ["planner", "writer", "chat"]
-    for role in roles:
-        cfg  = cfg_get(f"models.{role}")
-        name = cfg.get("name", role)
+    def _snapshot_exists(repo: str) -> bool:
+        """True if the repo has at least one snapshot dir with a safetensors file."""
+        dir_name  = "models--" + repo.replace("/", "--")
+        repo_dir  = cache / dir_name
+        snaps_dir = repo_dir / "snapshots"
+        if not snaps_dir.exists():
+            return False
+        for snap in snaps_dir.iterdir():
+            if snap.is_dir() and any(snap.iterdir()):
+                return True
+        return False
 
-        # ── MLX repo ──────────────────────────────────────────────────────
-        mlx_repo = cfg.get("mlx_repo", "")
-        if mlx_repo:
-            try:
-                logger.info(f"[prefetch] [{role}] MLX repo: {mlx_repo}")
-                snapshot_download(
-                    repo_id         = mlx_repo,
-                    cache_dir       = cache,
-                    token           = token,
-                    ignore_patterns = ["*.msgpack", "*.h5", "flax_model*", "tf_model*"],
-                )
-                results[f"{role}_mlx"] = "cached"
-                logger.info(f"[prefetch] [{role}] MLX ✅")
-            except Exception as e:
-                results[f"{role}_mlx"] = f"warning: {e}"
-                logger.warning(f"[prefetch] [{role}] MLX warning: {e}")
+    # ── MLX repos (planner + writer/chat share one repo) ─────────────────────
+    seen_repos: set = set()
+    for role in ("planner", "writer", "chat", "embedding"):
+        cfg      = cfg_get(f"models.{role}") or {}
+        repo     = cfg.get("mlx_repo") or cfg.get("hf_repo", "")
+        key      = f"{role}_mlx" if "mlx_repo" in cfg else "embedding"
+        if not repo or repo in seen_repos:
+            if repo in seen_repos:
+                results[key] = "cached"   # same weights as writer
+            continue
+        seen_repos.add(repo)
 
-        # ── GGUF file (fallback) ──────────────────────────────────────────
-        gguf_path = Path(cfg.get("gguf_path", ""))
-        if gguf_path.exists():
-            results[f"{role}_gguf"] = "already on disk"
-        elif cfg.get("gguf_repo") and cfg.get("gguf_filename"):
-            try:
-                logger.info(f"[prefetch] [{role}] GGUF: {cfg['gguf_filename']}")
-                hf_hub_download(
-                    repo_id   = cfg["gguf_repo"],
-                    filename  = cfg["gguf_filename"],
-                    local_dir = str(_models_dir()),
-                    token     = token,
-                )
-                results[f"{role}_gguf"] = "downloaded"
-                logger.info(f"[prefetch] [{role}] GGUF ✅")
-            except Exception as e:
-                results[f"{role}_gguf"] = f"warning: {e}"
-                logger.warning(f"[prefetch] [{role}] GGUF warning: {e}")
+        if _snapshot_exists(repo):
+            print(f"  ✅  [{key}] cached")
+            results[key] = "cached"
+            continue
 
-    # ── Embedding (HF snapshot, no GPU load) ─────────────────────────────
-    emb_repo = cfg_get("models.embedding.hf_repo", "nomic-ai/nomic-embed-text-v1")
-    try:
-        snapshot_download(repo_id=emb_repo, cache_dir=cache, token=token)
-        results["embedding"] = "cached"
-    except Exception as e:
-        results["embedding"] = f"warning: {e}"
+        print(f"  ⬇️   [{key}] downloading {repo} …")
+        try:
+            snapshot_download(
+                repo_id         = repo,
+                cache_dir       = str(cache),
+                token           = token,
+                ignore_patterns = ["*.msgpack", "*.h5", "flax_model*", "tf_model*"],
+            )
+            print(f"  ✅  [{key}] downloaded")
+            results[key] = "downloaded"
+        except Exception as e:
+            print(f"  ⚠️   [{key}] {e}")
+            results[key] = f"warning: {e}"
 
     return results
 
